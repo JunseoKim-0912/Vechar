@@ -1,0 +1,65 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from ..database import get_db
+from ..auth import get_current_user_id
+from ..models import Character, Conversation, Message
+from ..schemas import MessageCreateRequest, MessageRead, ConversationCreateRequest
+from ..services.chat_service import send_message
+
+router = APIRouter()
+
+
+@router.post("/conversations", status_code=201)
+def create_conversation(
+    payload: ConversationCreateRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    character = (
+        db.query(Character)
+        .filter(Character.id == payload.character_id, Character.user_id == user_id)
+        .first()
+    )
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    conversation = Conversation(character_id=character.id, user_id=user_id)
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    return {"id": conversation.id, "character_id": conversation.character_id}
+
+
+@router.get("/conversations/{conversation_id}/messages", response_model=list[MessageRead])
+def get_messages(conversation_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    conversation = (
+        db.query(Conversation).filter(Conversation.id == conversation_id, Conversation.user_id == user_id).first()
+    )
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    return (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+
+
+@router.post("/conversations/{conversation_id}/messages")
+def post_message(
+    conversation_id: str,
+    payload: MessageCreateRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation).filter(Conversation.id == conversation_id, Conversation.user_id == user_id).first()
+    )
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    try:
+        return send_message(db, conversation.character_id, conversation.id, payload.content, user_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"메시지 처리 중 오류가 발생했습니다: {e}")
