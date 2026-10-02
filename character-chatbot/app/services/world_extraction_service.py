@@ -1,6 +1,7 @@
 import json
 import re
-from ..llm import client, MODELS, extract_text
+from sqlalchemy.orm import Session
+from ..llm import generate_text
 from ..schemas import WorldProfileData
 from ..models import WorldSourceType
 
@@ -28,6 +29,8 @@ def _strip_code_fence(text: str) -> str:
 
 
 def extract_world_profile_from_text(
+    db: Session,
+    user_id: str,
     raw_text: str,
     source_type: WorldSourceType,
     series_name: str | None,
@@ -41,14 +44,16 @@ def extract_world_profile_from_text(
     else:
         context_hint = "이 텍스트는 세계관에 대한 사용자의 직접적인 설명입니다. 등장인물 정보는 없을 수 있습니다."
 
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=2000,
-        system=WORLD_EXTRACTION_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"{context_hint}\n\n---\n{raw_text}\n---"}],
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="world_extraction",
+        instructions=WORLD_EXTRACTION_SYSTEM_PROMPT,
+        input_messages=[{"role": "user", "content": f"{context_hint}\n\n---\n{raw_text}\n---"}],
+        max_output_tokens=2000,
     )
 
-    raw = _strip_code_fence(extract_text(response))
+    raw = _strip_code_fence(response_text)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as e:

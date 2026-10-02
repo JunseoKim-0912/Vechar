@@ -7,4 +7,4 @@ pydantic[email]==2.13.4
 bcrypt==5.0.0
 pyjwt==2.13.0
 python-multipart==0.0.32
-anthropic==0.117.0
+openai==3.22.1

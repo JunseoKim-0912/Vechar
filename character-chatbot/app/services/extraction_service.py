@@ -1,6 +1,7 @@
 import json
 import re
-from ..llm import client, MODELS, extract_text
+from sqlalchemy.orm import Session
+from ..llm import generate_text
 from ..schemas import CharacterProfileData
 from ..models import SourceType
 
@@ -31,21 +32,25 @@ def _strip_code_fence(text: str) -> str:
     return re.sub(r"^```json\s*|```\s*$", "", text.strip())
 
 
-def extract_profile_from_text(raw_text: str, source_type: SourceType, character_name: str) -> CharacterProfileData:
+def extract_profile_from_text(
+    db: Session, user_id: str, raw_text: str, source_type: SourceType, character_name: str
+) -> CharacterProfileData:
     type_hint = {
         SourceType.MANUAL_DESCRIPTION: "이 텍스트는 사용자가 캐릭터에 대해 직접 설명한 내용입니다.",
         SourceType.DIALOGUE: "이 텍스트는 캐릭터가 실제로 말한 대화 기록입니다.",
         SourceType.STORY: "이 텍스트는 캐릭터가 등장하는 단편 소설입니다.",
     }[source_type]
 
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=2000,
-        system=EXTRACTION_SYSTEM_PROMPT_TEMPLATE.format(character_name=character_name),
-        messages=[{"role": "user", "content": f"{type_hint}\n\n---\n{raw_text}\n---"}],
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="character_extraction",
+        instructions=EXTRACTION_SYSTEM_PROMPT_TEMPLATE.format(character_name=character_name),
+        input_messages=[{"role": "user", "content": f"{type_hint}\n\n---\n{raw_text}\n---"}],
+        max_output_tokens=2000,
     )
 
-    raw = _strip_code_fence(extract_text(response))
+    raw = _strip_code_fence(response_text)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as e:

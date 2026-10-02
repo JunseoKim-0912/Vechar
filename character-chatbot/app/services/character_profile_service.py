@@ -1,6 +1,6 @@
 import json
 from sqlalchemy.orm import Session
-from ..llm import client, MODELS, extract_text
+from ..llm import generate_text
 from ..models import CharacterProfile, CharacterProfileHistory, CorrectionLog, ChangeReason
 from ..schemas import CharacterProfileData
 
@@ -65,7 +65,9 @@ SYNTHESIS_SYSTEM_PROMPT = """당신은 캐릭터 프로필 편집자입니다. �
 {"personality_summary": "...", "speech_style": "..."}"""
 
 
-def merge_training_source(db: Session, character_id: str, newly_extracted: CharacterProfileData) -> CharacterProfile:
+def merge_training_source(
+    db: Session, user_id: str, character_id: str, newly_extracted: CharacterProfileData
+) -> CharacterProfile:
     """새 TrainingSource가 추출된 뒤 호출됩니다 (extraction_service.py 참고)."""
     existing_row = get_profile(db, character_id)
     existing_data = (
@@ -93,11 +95,12 @@ def merge_training_source(db: Session, character_id: str, newly_extracted: Chara
         return _snapshot_and_save(db, character_id, initial, ChangeReason.TRAINING_INGEST)
 
     # 두 번째 소스부터는 기존 요약과 새 요약을 자연스럽게 통합하도록 LLM에 위임합니다.
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=1500,
-        system=SYNTHESIS_SYSTEM_PROMPT,
-        messages=[
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="character_synthesis",
+        instructions=SYNTHESIS_SYSTEM_PROMPT,
+        input_messages=[
             {
                 "role": "user",
                 "content": json.dumps(
@@ -115,8 +118,9 @@ def merge_training_source(db: Session, character_id: str, newly_extracted: Chara
                 ),
             }
         ],
+        max_output_tokens=1500,
     )
-    synthesized = json.loads(extract_text(response).strip().removeprefix("```json").removesuffix("```").strip())
+    synthesized = json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
 
     final_data = merged_arrays_only.model_copy(
         update={
@@ -144,18 +148,19 @@ CORRECTION_SYSTEM_PROMPT = """당신은 캐릭터 프로필 편집자입니다. 
 }"""
 
 
-def apply_user_correction(db: Session, character_id: str, user_instruction: str) -> CharacterProfile:
+def apply_user_correction(db: Session, user_id: str, character_id: str, user_instruction: str) -> CharacterProfile:
     """오직 /수정 명령어 경로에서만 호출됩니다 — 일반 대화 턴에서는 절대 호출되지 않습니다."""
     existing_row = get_profile(db, character_id)
     existing_data = (
         CharacterProfileData.model_validate(existing_row.data) if existing_row else CharacterProfileData()
     )
 
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=4000,
-        system=CORRECTION_SYSTEM_PROMPT,
-        messages=[
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="character_correction",
+        instructions=CORRECTION_SYSTEM_PROMPT,
+        input_messages=[
             {
                 "role": "user",
                 "content": json.dumps(
@@ -164,9 +169,10 @@ def apply_user_correction(db: Session, character_id: str, user_instruction: str)
                 ),
             }
         ],
+        max_output_tokens=4000,
     )
     parsed = CharacterProfileData.model_validate(
-        json.loads(extract_text(response).strip().removeprefix("```json").removesuffix("```").strip())
+        json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
     )
 
     updated = _snapshot_and_save(db, character_id, parsed, ChangeReason.USER_CORRECTION)

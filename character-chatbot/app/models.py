@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Text, Integer, Boolean, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, String, Text, Integer, Boolean, DateTime, ForeignKey, JSON, Numeric, Index
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -248,3 +248,23 @@ class ImportLog(Base):
     import_type = Column(String, nullable=False)  # "character" | "world"
     entity_id = Column(String, nullable=False)  # 새로 만들어진 character_id/world_id
     created_at = Column(DateTime, default=utcnow)
+
+
+class LLMUsage(Base):
+    __tablename__ = "llm_usage"
+    __table_args__ = (Index("ix_llm_usage_user_created", "user_id", "created_at"),)
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    request_type = Column(String, nullable=False)
+    model = Column(String, nullable=False)
+    status = Column(String, nullable=False)  # reserved | completed | failed | failed_response | usage_unavailable | preflight_failed
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    total_tokens = Column(Integer, nullable=False, default=0)
+    cached_input_tokens = Column(Integer, nullable=False, default=0)
+    reserved_total_tokens = Column(Integer, nullable=False, default=0)
+    budget_tokens = Column(Integer, nullable=False, default=0)
+    estimated_cost_usd = Column(Numeric(12, 8), nullable=True)
+    error_type = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)

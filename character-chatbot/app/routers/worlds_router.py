@@ -169,12 +169,12 @@ async def upload_world_source(
     db.refresh(source)
 
     try:
-        extracted = extract_world_profile_from_text(raw_text, source_type, series_name, episode_number)
+        extracted = extract_world_profile_from_text(db, user_id, raw_text, source_type, series_name, episode_number)
         source.extracted_data = extracted.model_dump()
         source.status = IngestStatus.EXTRACTED
         db.commit()
 
-        updated_profile = merge_world_source(db, world.id, extracted)
+        updated_profile = merge_world_source(db, user_id, world.id, extracted)
 
         source.status = IngestStatus.MERGED
         db.commit()
@@ -184,6 +184,11 @@ async def upload_world_source(
             "status": source.status,
             "profile": WorldProfileRead.model_validate(updated_profile),
         }
+    except HTTPException as e:
+        source.status = IngestStatus.FAILED
+        source.error_message = str(e.detail)
+        db.commit()
+        raise
     except Exception as e:
         source.status = IngestStatus.FAILED
         source.error_message = str(e)
@@ -196,7 +201,7 @@ def get_world_summary(world_id: str, user_id: str = Depends(get_current_user_id)
     world = db.query(World).filter(World.id == world_id, World.user_id == user_id).first()
     if not world:
         raise HTTPException(status_code=404, detail="World not found")
-    return {"summary": summarize_world(db, world_id)}
+    return {"summary": summarize_world(db, user_id, world_id)}
 
 
 @router.post("/{world_id}/edit", response_model=WorldProfileRead)
@@ -213,7 +218,9 @@ def edit_world(
         raise HTTPException(status_code=400, detail=f"operation은 {sorted(VALID_OPERATIONS)} 중 하나여야 합니다.")
 
     try:
-        return apply_world_edit(db, world_id, payload.operation, payload.instruction)
+        return apply_world_edit(db, user_id, world_id, payload.operation, payload.instruction)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"세계관 편집 중 오류가 발생했습니다: {e}")
 
@@ -226,7 +233,9 @@ def compact_world(world_id: str, user_id: str = Depends(get_current_user_id), db
         raise HTTPException(status_code=404, detail="World not found")
 
     try:
-        return compact_world_profile(db, world_id)
+        return compact_world_profile(db, user_id, world_id)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"세계관 압축 중 오류가 발생했습니다: {e}")
 
@@ -264,7 +273,9 @@ def extract_character_from_world(
         raise HTTPException(status_code=404, detail=f"'{payload.name}'이(가) 언급된 세계관 텍스트를 찾지 못했습니다.")
 
     try:
-        extracted = extract_character_from_world_text(payload.name, matching_texts)
+        extracted = extract_character_from_world_text(db, user_id, payload.name, matching_texts)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"캐릭터 추출 중 오류가 발생했습니다: {e}")
 

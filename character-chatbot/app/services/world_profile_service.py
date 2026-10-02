@@ -1,6 +1,6 @@
 import json
 from sqlalchemy.orm import Session
-from ..llm import client, MODELS, extract_text
+from ..llm import generate_text
 from ..models import World, WorldProfile, WorldProfileHistory, ChangeReason
 from ..schemas import WorldProfileData, MentionedCharacter
 
@@ -96,20 +96,22 @@ name은 그중 가장 널리 알려진 대표 이름 하나로 정하세요.
 
 
 def _rank_and_dedupe_characters(
-    existing: list[MentionedCharacter], new: list[MentionedCharacter]
+    db: Session, user_id: str, existing: list[MentionedCharacter], new: list[MentionedCharacter]
 ) -> list[MentionedCharacter]:
     """이름/별명이 겹치는 인물을 하나로 합치고, 중요도 순으로 정렬해서 최대 20명까지만 남깁니다."""
     combined = [c.model_dump() for c in existing] + [c.model_dump() for c in new]
     if not combined:
         return []
 
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=1500,
-        system=CHARACTER_RANKING_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": json.dumps({"characters": combined}, ensure_ascii=False)}],
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="world_character_ranking",
+        instructions=CHARACTER_RANKING_SYSTEM_PROMPT,
+        input_messages=[{"role": "user", "content": json.dumps({"characters": combined}, ensure_ascii=False)}],
+        max_output_tokens=1500,
     )
-    parsed = json.loads(extract_text(response).strip().removeprefix("```json").removesuffix("```").strip())
+    parsed = json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
     cleaned_raw = parsed.get("mentioned_characters", combined)
     cleaned = [MentionedCharacter.model_validate(c) for c in cleaned_raw]
     return cleaned[:20]
@@ -120,7 +122,9 @@ WORLD_SYNTHESIS_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. 기�
 
 반드시 아래 JSON으로만 응답하세요. 다른 텍스트 없이 순수 JSON만 출력합니다.
 {"world_summary": "..."}"""
-def merge_world_source(db: Session, world_id: str, newly_extracted: WorldProfileData) -> WorldProfile:
+def merge_world_source(
+    db: Session, user_id: str, world_id: str, newly_extracted: WorldProfileData
+) -> WorldProfile:
     """새 WorldSource(화/설명)가 추출된 뒤 호출됩니다."""
     existing_row = get_world_profile(db, world_id)
     existing_data = (
@@ -128,7 +132,7 @@ def merge_world_source(db: Session, world_id: str, newly_extracted: WorldProfile
     )
 
     cleaned_characters = _rank_and_dedupe_characters(
-        existing_data.mentioned_characters, newly_extracted.mentioned_characters
+        db, user_id, existing_data.mentioned_characters, newly_extracted.mentioned_characters
     )
 
     merged_arrays_only = WorldProfileData(
@@ -142,11 +146,12 @@ def merge_world_source(db: Session, world_id: str, newly_extracted: WorldProfile
         initial = merged_arrays_only.model_copy(update={"world_summary": newly_extracted.world_summary})
         return _snapshot_and_save(db, world_id, initial, ChangeReason.TRAINING_INGEST)
 
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=1500,
-        system=WORLD_SYNTHESIS_SYSTEM_PROMPT,
-        messages=[
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="world_synthesis",
+        instructions=WORLD_SYNTHESIS_SYSTEM_PROMPT,
+        input_messages=[
             {
                 "role": "user",
                 "content": json.dumps(
@@ -158,8 +163,9 @@ def merge_world_source(db: Session, world_id: str, newly_extracted: WorldProfile
                 ),
             }
         ],
+        max_output_tokens=1500,
     )
-    synthesized = json.loads(extract_text(response).strip().removeprefix("```json").removesuffix("```").strip())
+    synthesized = json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
 
     final_data = merged_arrays_only.model_copy(
         update={"world_summary": synthesized.get("world_summary") or existing_data.world_summary}
@@ -185,7 +191,7 @@ WORLD_EDIT_JSON_SPEC = """
 }"""
 
 
-def apply_world_edit(db: Session, world_id: str, operation: str, instruction: str) -> WorldProfile:
+def apply_world_edit(db: Session, user_id: str, world_id: str, operation: str, instruction: str) -> WorldProfile:
     """세계관 관리 화면에서만 호출됩니다 (add/delete/modify). operation은 반드시 이 셋 중 하나."""
     if operation not in WORLD_EDIT_SYSTEM_PROMPTS:
         raise ValueError(f"Unknown world edit operation: {operation}")
@@ -195,11 +201,12 @@ def apply_world_edit(db: Session, world_id: str, operation: str, instruction: st
         WorldProfileData.model_validate(existing_row.data) if existing_row else WorldProfileData()
     )
 
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=8000,  # 세계관 프로필 전체를 다시 써야 하므로 여유 있게 (character 쪽과 같은 이유)
-        system=WORLD_EDIT_SYSTEM_PROMPTS[operation] + WORLD_EDIT_JSON_SPEC,
-        messages=[
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="world_edit",
+        instructions=WORLD_EDIT_SYSTEM_PROMPTS[operation] + WORLD_EDIT_JSON_SPEC,
+        input_messages=[
             {
                 "role": "user",
                 "content": json.dumps(
@@ -208,9 +215,10 @@ def apply_world_edit(db: Session, world_id: str, operation: str, instruction: st
                 ),
             }
         ],
+        max_output_tokens=8000,  # 세계관 프로필 전체를 다시 써야 하므로 여유 있게 (character 쪽과 같은 이유)
     )
     parsed = WorldProfileData.model_validate(
-        json.loads(extract_text(response).strip().removeprefix("```json").removesuffix("```").strip())
+        json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
     )
 
     return _snapshot_and_save(db, world_id, parsed, ChangeReason.WORLD_EDIT)
@@ -220,20 +228,22 @@ WORLD_SUMMARY_SYSTEM_PROMPT = """당신은 세계관 안내자입니다. 주어�
 자연스러운 문단 몇 개로 요약해서 설명하세요. 목록을 나열하듯 말하지 말고, 이야기하듯 풀어서 설명하세요."""
 
 
-def summarize_world(db: Session, world_id: str) -> str:
+def summarize_world(db: Session, user_id: str, world_id: str) -> str:
     """Return 작업 — 지금까지 알고 있는 세계관 정보를 사람이 읽기 좋게 요약."""
     profile_row = get_world_profile(db, world_id)
     if not profile_row:
         return "아직 이 세계관에 대해 알고 있는 정보가 없습니다."
 
     data = WorldProfileData.model_validate(profile_row.data)
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=1000,
-        system=WORLD_SUMMARY_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": json.dumps(data.model_dump(), ensure_ascii=False)}],
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="world_summary",
+        instructions=WORLD_SUMMARY_SYSTEM_PROMPT,
+        input_messages=[{"role": "user", "content": json.dumps(data.model_dump(), ensure_ascii=False)}],
+        max_output_tokens=1000,
     )
-    return extract_text(response)
+    return response_text
 
 
 COMPACT_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. key_facts와 timeline_notes 배열이 화를 거듭 학습하면서
@@ -251,7 +261,7 @@ COMPACT_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. key_facts와 
 }"""
 
 
-def compact_world_profile(db: Session, world_id: str) -> WorldProfile:
+def compact_world_profile(db: Session, user_id: str, world_id: str) -> WorldProfile:
     """세계관이 여러 시리즈/화를 거치며 커졌을 때, 쌓인 정보를 중복 없이 압축. 사용자가 명시적으로 요청할 때만 호출.
     mentioned_characters는 이 김에 이름/별명 기준으로도 다시 한번 확실하게 정리합니다."""
     existing_row = get_world_profile(db, world_id)
@@ -259,16 +269,18 @@ def compact_world_profile(db: Session, world_id: str) -> WorldProfile:
         raise ValueError("압축할 세계관 프로필이 없습니다.")
     existing_data = WorldProfileData.model_validate(existing_row.data)
 
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=8000,
-        system=COMPACT_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": json.dumps(existing_data.model_dump(), ensure_ascii=False)}],
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="world_compaction",
+        instructions=COMPACT_SYSTEM_PROMPT,
+        input_messages=[{"role": "user", "content": json.dumps(existing_data.model_dump(), ensure_ascii=False)}],
+        max_output_tokens=8000,
     )
-    raw = json.loads(extract_text(response).strip().removeprefix("```json").removesuffix("```").strip())
+    raw = json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
 
     # mentioned_characters는 COMPACT_SYSTEM_PROMPT의 결과를 믿지 않고, 전담 함수로 다시 한번 확실하게 정리
-    re_ranked = _rank_and_dedupe_characters(existing_data.mentioned_characters, [])
+    re_ranked = _rank_and_dedupe_characters(db, user_id, existing_data.mentioned_characters, [])
     raw["mentioned_characters"] = [c.model_dump() for c in re_ranked]
 
     parsed = WorldProfileData.model_validate(raw)

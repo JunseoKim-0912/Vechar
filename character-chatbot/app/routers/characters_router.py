@@ -166,12 +166,12 @@ async def upload_training_source(
     db.refresh(source)
 
     try:
-        extracted = extract_profile_from_text(raw_text, source_type, character.name)
+        extracted = extract_profile_from_text(db, user_id, raw_text, source_type, character.name)
         source.extracted_data = extracted.model_dump()
         source.status = IngestStatus.EXTRACTED
         db.commit()
 
-        updated_profile = merge_training_source(db, character.id, extracted)
+        updated_profile = merge_training_source(db, user_id, character.id, extracted)
 
         source.status = IngestStatus.MERGED
         db.commit()
@@ -181,6 +181,11 @@ async def upload_training_source(
             "status": source.status,
             "profile": CharacterProfileRead.model_validate(updated_profile),
         }
+    except HTTPException as e:
+        source.status = IngestStatus.FAILED
+        source.error_message = str(e.detail)
+        db.commit()
+        raise
     except Exception as e:
         source.status = IngestStatus.FAILED
         source.error_message = str(e)

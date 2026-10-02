@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from ..models import Character, Message, MessageRole, CorrectionLog
-from ..llm import client, MODELS, extract_text
+from ..llm import generate_text
 from ..schemas import CharacterProfileData, WorldProfileData
 from .character_profile_service import get_profile, apply_user_correction
 from .world_profile_service import get_world_profile
@@ -87,7 +87,7 @@ def send_message(db: Session, character_id: str, conversation_id: str, user_mess
         )
         db.commit()
 
-        updated = apply_user_correction(db, character_id, instruction)
+        updated = apply_user_correction(db, user_id, character_id, instruction)
         return {"role": "SYSTEM_NOTE", "content": f"캐릭터 프로필이 업데이트되었습니다 (v{updated.version})."}
 
     character = db.query(Character).filter(Character.id == character_id).one()
@@ -122,35 +122,16 @@ def send_message(db: Session, character_id: str, conversation_id: str, user_mess
         {"role": "user" if m.role == MessageRole.USER else "assistant", "content": m.content} for m in history
     ]
 
-    # PROMPT CACHING: mark a cache breakpoint at the end of the existing history.
-    # Anthropic caches everything up through a marked block, so on the *next* turn
-    # (when this same history is the common prefix again, plus 2 new messages),
-    # that whole prefix is billed at the cached-read rate instead of full price.
-    # This is what actually saves money on long-running conversations — the
-    # growing-history resend is the dominant cost driver, not the training calls.
-    if api_messages:
-        last = api_messages[-1]
-        api_messages[-1] = {
-            "role": last["role"],
-            "content": [{"type": "text", "text": last["content"], "cache_control": {"type": "ephemeral"}}],
-        }
-
     api_messages.append({"role": "user", "content": user_message})
 
-    response = client.messages.create(
-        model=MODELS["roleplay"],
-        max_tokens=ROLEPLAY_MAX_TOKENS,
-        thinking={"type": "disabled"},  # Sonnet 5부터 기본으로 켜지는 적응형 사고 — 롤플레이엔 불필요하고 max_tokens를 잡아먹음
-        system=[
-            {
-                "type": "text",
-                "text": _build_system_prompt(character.name, profile_data, world_data),
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=api_messages,
+    reply_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="chat",
+        instructions=_build_system_prompt(character.name, profile_data, world_data),
+        input_messages=api_messages,
+        max_output_tokens=ROLEPLAY_MAX_TOKENS,
     )
-    reply_text = extract_text(response)
 
     db.add(Message(conversation_id=conversation_id, role=MessageRole.CHARACTER, content=reply_text))
     db.commit()

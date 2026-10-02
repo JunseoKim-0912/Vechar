@@ -12,6 +12,8 @@ TIER_LIMITS = {
         "max_corrections_per_day": 5,
         "max_exports_per_month": 5,
         "max_imports_per_month": 5,
+        "max_llm_tokens_per_day": 25000,
+        "max_llm_tokens_per_month": 100000,
     },
     "premium": {
         "max_worlds": 5,
@@ -19,6 +21,8 @@ TIER_LIMITS = {
         "max_corrections_per_day": 25,
         "max_exports_per_month": 10,
         "max_imports_per_month": 10,
+        "max_llm_tokens_per_day": 250000,
+        "max_llm_tokens_per_month": 1000000,
     },
 }
 

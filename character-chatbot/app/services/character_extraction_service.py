@@ -1,6 +1,7 @@
 import json
 import re
-from ..llm import client, MODELS, extract_text
+from sqlalchemy.orm import Session
+from ..llm import generate_text
 from ..schemas import CharacterProfileData
 
 FOCUSED_EXTRACTION_SYSTEM_PROMPT = """당신은 캐릭터 분석가입니다. 여러 개의 텍스트가 주어지고, 그 중 특정 인물 한 명에
@@ -24,15 +25,19 @@ def _strip_code_fence(text: str) -> str:
     return re.sub(r"^```json\s*|```\s*$", "", text.strip())
 
 
-def extract_character_from_world_text(character_name: str, source_texts: list[str]) -> CharacterProfileData:
+def extract_character_from_world_text(
+    db: Session, user_id: str, character_name: str, source_texts: list[str]
+) -> CharacterProfileData:
     combined = "\n\n---\n\n".join(source_texts)
-    response = client.messages.create(
-        model=MODELS["extraction"],
-        max_tokens=4000,
-        system=FOCUSED_EXTRACTION_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"지목된 인물: {character_name}\n\n{combined}"}],
+    response_text = generate_text(
+        db=db,
+        user_id=user_id,
+        request_type="world_character_extraction",
+        instructions=FOCUSED_EXTRACTION_SYSTEM_PROMPT,
+        input_messages=[{"role": "user", "content": f"지목된 인물: {character_name}\n\n{combined}"}],
+        max_output_tokens=4000,
     )
-    raw = _strip_code_fence(extract_text(response))
+    raw = _strip_code_fence(response_text)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as e:
