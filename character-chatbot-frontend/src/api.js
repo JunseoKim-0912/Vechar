@@ -1,4 +1,10 @@
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000";
+export const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_BASE || "http://localhost:4000"
+).replace(/\/+$/, "");
+
+export function apiAssetUrl(url) {
+  return url?.startsWith("/uploads/") ? `${API_BASE_URL}${url}` : url;
+}
 
 export function getToken() {
   return localStorage.getItem("token");
@@ -22,7 +28,7 @@ async function request(path, { method = "GET", body, isForm = false, auth = true
     fetchBody = JSON.stringify(body);
   }
 
-  const res = await fetch(`${API_BASE}${path}`, { method, headers, body: fetchBody });
+  const res = await fetch(`${API_BASE_URL}${path}`, { method, headers, body: fetchBody });
 
   const text = await res.text();
   let data = null;

@@ -5,7 +5,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV"):
+    if not JWT_SECRET or JWT_SECRET == "dev-secret-change-me":
+        raise RuntimeError("JWT_SECRET must be configured for Vercel deployments")
+JWT_SECRET = JWT_SECRET or "dev-secret-change-me"
 JWT_ALGORITHM = "HS256"
 
 security = HTTPBearer()

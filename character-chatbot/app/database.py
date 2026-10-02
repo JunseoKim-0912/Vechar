@@ -8,6 +8,8 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set. Check your .env file.")
+if (os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV")) and DATABASE_URL.startswith("sqlite"):
+    raise RuntimeError("Vercel deployments require a persistent PostgreSQL DATABASE_URL")
 
 # connect_args는 sqlite에서만 필요합니다 (postgres에서는 빈 dict라 영향 없음).
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../api";
+import { api, apiAssetUrl } from "../api";
 
 export default function CharacterListPage() {
   const [characters, setCharacters] = useState(null);
@@ -85,7 +85,7 @@ export default function CharacterListPage() {
         {characters.map((c) => (
           <div key={c.id} className="entity-card">
             {c.profile_image_url ? (
-              <img src={c.profile_image_url} alt={c.name} className="avatar" />
+              <img src={apiAssetUrl(c.profile_image_url)} alt={c.name} className="avatar" />
             ) : (
               <div className="avatar avatar-placeholder">{c.name[0]}</div>
             )}

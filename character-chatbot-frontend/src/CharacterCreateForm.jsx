@@ -1,6 +1,5 @@
 import { useState } from "react";
-
-const API = "http://localhost:4000";
+import { API_BASE_URL } from "./api";
 
 export default function CharacterCreateForm({ token, onCreated }) {
   const [name, setName] = useState("");
@@ -15,7 +14,7 @@ export default function CharacterCreateForm({ token, onCreated }) {
     if (imageFile) {
       const form = new FormData();
       form.append("image", imageFile);
-      const res = await fetch(`${API}/upload`, {
+      const res = await fetch(`${API_BASE_URL}/upload`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: form,
@@ -25,7 +24,7 @@ export default function CharacterCreateForm({ token, onCreated }) {
       profileImageUrl = data.url;
     }
 
-    const res = await fetch(`${API}/characters/`, {
+    const res = await fetch(`${API_BASE_URL}/characters/`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ name, profile_image_url: profileImageUrl }),

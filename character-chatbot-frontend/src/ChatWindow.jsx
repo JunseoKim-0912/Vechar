@@ -1,6 +1,5 @@
 import { useState } from "react";
-
-const API = "http://localhost:4000";
+import { API_BASE_URL } from "./api";
 
 export default function ChatWindow({ token, conversationId }) {
   const [messages, setMessages] = useState([]);
@@ -12,7 +11,7 @@ export default function ChatWindow({ token, conversationId }) {
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
 
-    const res = await fetch(`${API}/chat/conversations/${conversationId}/messages`, {
+    const res = await fetch(`${API_BASE_URL}/chat/conversations/${conversationId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ content: userMsg.content }),

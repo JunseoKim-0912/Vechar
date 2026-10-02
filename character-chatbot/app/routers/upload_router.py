@@ -6,10 +6,13 @@ from ..auth import get_current_user_id
 
 router = APIRouter()
 UPLOAD_DIR = "uploads"
+LOCAL_UPLOADS_ENABLED = not (os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV"))
 
 
 @router.post("/")
 def upload_image(image: UploadFile = File(...), user_id: str = Depends(get_current_user_id)):
+    if not LOCAL_UPLOADS_ENABLED:
+        raise HTTPException(status_code=503, detail="Image uploads are unavailable in this deployment")
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="이미지 파일만 업로드할 수 있습니다.")
 

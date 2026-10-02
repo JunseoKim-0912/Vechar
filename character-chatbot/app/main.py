@@ -9,15 +9,27 @@ from .routers import worlds_router
 
 app = FastAPI(title="Character Chatbot API")
 
+raw_cors_origins = os.getenv("CORS_ORIGINS")
+if raw_cors_origins is None:
+    cors_origins = [] if os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV") else [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+else:
+    cors_origins = [origin.strip().rstrip("/") for origin in raw_cors_origins.split(",") if origin.strip()]
+if (os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV")) and "*" in cors_origins:
+    raise RuntimeError("CORS_ORIGINS must list explicit origins on Vercel")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 배포 전에 실제 프론트엔드 주소로 좁히세요
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+if upload_router.LOCAL_UPLOADS_ENABLED:
+    os.makedirs("uploads", exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
 @app.on_event("startup")
