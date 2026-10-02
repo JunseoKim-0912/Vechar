@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user_id
 from ..models import Character, Conversation, Message
+from ..ownership import get_owned_world
 from ..schemas import MessageCreateRequest, MessageRead, ConversationCreateRequest
 from ..services.chat_service import send_message
 
@@ -22,6 +23,8 @@ def create_conversation(
     )
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
+    if character.world_id:
+        get_owned_world(db, character.world_id, user_id)
 
     conversation = Conversation(character_id=character.id, user_id=user_id)
     db.add(conversation)
@@ -33,7 +36,10 @@ def create_conversation(
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageRead])
 def get_messages(conversation_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
     conversation = (
-        db.query(Conversation).filter(Conversation.id == conversation_id, Conversation.user_id == user_id).first()
+        db.query(Conversation)
+        .join(Character, Conversation.character_id == Character.id)
+        .filter(Conversation.id == conversation_id, Conversation.user_id == user_id, Character.user_id == user_id)
+        .first()
     )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -54,7 +60,10 @@ def post_message(
     db: Session = Depends(get_db),
 ):
     conversation = (
-        db.query(Conversation).filter(Conversation.id == conversation_id, Conversation.user_id == user_id).first()
+        db.query(Conversation)
+        .join(Character, Conversation.character_id == Character.id)
+        .filter(Conversation.id == conversation_id, Conversation.user_id == user_id, Character.user_id == user_id)
+        .first()
     )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")

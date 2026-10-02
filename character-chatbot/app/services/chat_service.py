@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from ..models import Character, Message, MessageRole, CorrectionLog
 from ..llm import generate_text
@@ -6,6 +7,7 @@ from ..schemas import CharacterProfileData, WorldProfileData
 from .character_profile_service import get_profile, apply_user_correction
 from .world_profile_service import get_world_profile
 from ..tier_limits import get_limits
+from ..ownership import get_owned_world
 
 CORRECTION_PREFIX = "/수정"
 
@@ -57,6 +59,12 @@ def _build_system_prompt(
 
 
 def send_message(db: Session, character_id: str, conversation_id: str, user_message: str, user_id: str) -> dict:
+    character = db.query(Character).filter(Character.id == character_id, Character.user_id == user_id).first()
+    if character is None:
+        raise HTTPException(status_code=404, detail="Character not found")
+    if character.world_id:
+        get_owned_world(db, character.world_id, user_id)
+
     # Route explicit corrections to the guarded write path — never to the roleplay model.
     if user_message.strip().startswith(CORRECTION_PREFIX):
         instruction = user_message.strip()[len(CORRECTION_PREFIX):].strip()
@@ -90,7 +98,6 @@ def send_message(db: Session, character_id: str, conversation_id: str, user_mess
         updated = apply_user_correction(db, user_id, character_id, instruction)
         return {"role": "SYSTEM_NOTE", "content": f"캐릭터 프로필이 업데이트되었습니다 (v{updated.version})."}
 
-    character = db.query(Character).filter(Character.id == character_id).one()
     profile_row = get_profile(db, character_id)  # READ ONLY — this module never writes.
     profile_data = (
         CharacterProfileData.model_validate(profile_row.data) if profile_row else CharacterProfileData()

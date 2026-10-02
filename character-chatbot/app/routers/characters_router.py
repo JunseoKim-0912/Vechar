@@ -18,6 +18,7 @@ from ..schemas import (
 from ..services.extraction_service import extract_profile_from_text
 from ..services.character_profile_service import merge_training_source, get_profile, set_initial_profile
 from ..services.world_profile_service import get_or_create_default_world
+from ..ownership import get_owned_world
 from ..tier_limits import get_limits, check_and_log_export, check_import_quota, log_import
 
 router = APIRouter()
@@ -39,8 +40,10 @@ def create_character(
         )
 
     world_id = payload.world_id
-    if not world_id:
+    if world_id is None:
         world_id = get_or_create_default_world(db, user_id).id
+    else:
+        get_owned_world(db, world_id, user_id)
 
     character = Character(
         user_id=user_id, name=payload.name, profile_image_url=payload.profile_image_url, world_id=world_id
