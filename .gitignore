@@ -1,0 +1,19 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local databases and user uploads
+*.db
+*.sqlite
+*.sqlite3
+character-chatbot/uploads/
+
+# Operating system files
+.DS_Store
