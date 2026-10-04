@@ -155,7 +155,7 @@ class ChatContextBudgetTests(unittest.TestCase):
                     result = counter("canonical", [{"role": "user", "content": "hello"}])
         self.assertEqual(result, 42)
         model.assert_called_once_with("chat")
-        capacity.assert_called_once_with(db.get_bind.return_value, "user-id", 2000)
+        capacity.assert_called_once_with(db.get_bind.return_value, "user-id", "chat-model", 2000)
         client.responses.input_tokens.count.assert_called_once_with(
             model="chat-model", instructions="canonical", input=[{"role": "user", "content": "hello"}],
         )

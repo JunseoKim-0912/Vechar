@@ -11,39 +11,53 @@ from .models import LLMUsage, User
 from .tier_limits import TIER_LIMITS
 
 
-def _period_usage(db: Session, user_id: str, start: datetime) -> int:
-    return int(
-        db.query(func.coalesce(func.sum(LLMUsage.budget_tokens), 0))
+def _period_usage(db: Session, user_id: str, start: datetime) -> Decimal:
+    return Decimal(
+        db.query(func.coalesce(func.sum(LLMUsage.estimated_cost_usd), 0))
         .filter(LLMUsage.user_id == user_id, LLMUsage.created_at >= start)
         .scalar()
     )
 
 
-def check_capacity(bind, user_id: str, output_cap: int) -> None:
+def _reservation_cost(model: str, input_tokens: int, output_cap: int) -> Decimal:
+    """Reserve uncached input plus the full output cap; cached input is reconciled later."""
+    cost = _estimated_cost(model, input_tokens, 0, output_cap)
+    if cost is None:
+        raise ValueError(f"No pricing configured for model: {model}")
+    return cost
+
+
+def _check_limits(db: Session, user_id: str, limits: dict, now: datetime, additional_cost: Decimal) -> None:
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if _period_usage(db, user_id, day_start) + additional_cost > limits["max_llm_cost_usd_per_day"]:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "daily_limit_reached", "message": "Daily LLM cost limit reached."},
+        )
+    month_start = day_start.replace(day=1)
+    if _period_usage(db, user_id, month_start) + additional_cost > limits["max_llm_cost_usd_per_month"]:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "monthly_limit_reached", "message": "Monthly LLM cost limit reached."},
+        )
+
+
+def check_capacity(bind, user_id: str, model: str, output_cap: int) -> None:
     """Reject exhausted accounts before contacting the token-count endpoint."""
+    minimum_reservation = _reservation_cost(model, 0, output_cap)
     with Session(bind=bind) as db:
         user = db.query(User).filter(User.id == user_id).first()
         if user is None:
             raise HTTPException(status_code=401, detail={"code": "user_not_found"})
         limits = TIER_LIMITS["premium" if user.is_premium else "free"]
-        now = datetime.now(timezone.utc)
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        if _period_usage(db, user_id, day_start) + output_cap > limits["max_llm_tokens_per_day"]:
-            raise HTTPException(
-                status_code=429,
-                detail={"code": "daily_limit_reached", "message": "Daily LLM token limit reached."},
-            )
-        if _period_usage(db, user_id, day_start.replace(day=1)) + output_cap > limits["max_llm_tokens_per_month"]:
-            raise HTTPException(
-                status_code=429,
-                detail={"code": "monthly_limit_reached", "message": "Monthly LLM token limit reached."},
-            )
+        _check_limits(db, user_id, limits, datetime.now(timezone.utc), minimum_reservation)
 
 
 def reserve_usage(bind, user_id: str, request_type: str, model: str, input_tokens: int, output_cap: int) -> str:
-    """Atomically reserve the counted input plus the maximum possible output."""
+    """Atomically reserve maximum estimated USD cost and retain token counts for accounting."""
     if input_tokens < 0 or output_cap <= 0:
         raise ValueError("Invalid LLM token reservation")
+    reserved_cost = _reservation_cost(model, input_tokens, output_cap)
 
     with Session(bind=bind) as db:
         # SQLite ignores SELECT FOR UPDATE; BEGIN IMMEDIATE serializes writers instead.
@@ -57,20 +71,8 @@ def reserve_usage(bind, user_id: str, request_type: str, model: str, input_token
 
         limits = TIER_LIMITS["premium" if user.is_premium else "free"]
         now = datetime.now(timezone.utc)
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        month_start = day_start.replace(day=1)
         reservation = input_tokens + output_cap
-
-        if _period_usage(db, user_id, day_start) + reservation > limits["max_llm_tokens_per_day"]:
-            raise HTTPException(
-                status_code=429,
-                detail={"code": "daily_limit_reached", "message": "Daily LLM token limit reached."},
-            )
-        if _period_usage(db, user_id, month_start) + reservation > limits["max_llm_tokens_per_month"]:
-            raise HTTPException(
-                status_code=429,
-                detail={"code": "monthly_limit_reached", "message": "Monthly LLM token limit reached."},
-            )
+        _check_limits(db, user_id, limits, now, reserved_cost)
 
         row = LLMUsage(
             user_id=user_id,
@@ -79,6 +81,7 @@ def reserve_usage(bind, user_id: str, request_type: str, model: str, input_token
             status="reserved",
             reserved_total_tokens=reservation,
             budget_tokens=reservation,
+            estimated_cost_usd=reserved_cost,
             created_at=now,
         )
         db.add(row)
@@ -131,9 +134,12 @@ def record_response(bind, usage_id: str, response, *, output_error: str | None =
             details = getattr(usage, "input_tokens_details", None)
             row.cached_input_tokens = int(getattr(details, "cached_tokens", 0) or 0)
             row.budget_tokens = max(0, row.total_tokens)
-            row.estimated_cost_usd = _estimated_cost(
+            actual_cost = _estimated_cost(
                 row.model, row.input_tokens, row.cached_input_tokens, row.output_tokens
             )
+            # An unpriced provider-reported model must not erase the reservation.
+            if actual_cost is not None:
+                row.estimated_cost_usd = actual_cost
             row.status = (
                 "completed" if output_error is None and response.status == "completed" and response.output_text
                 else "failed_response"
@@ -153,4 +159,5 @@ def record_failure(bind, usage_id: str, error_type: str, definitely_unbilled: bo
         row.error_type = error_type
         if definitely_unbilled:
             row.budget_tokens = 0
+            row.estimated_cost_usd = Decimal(0)
         db.commit()

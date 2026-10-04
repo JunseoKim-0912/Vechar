@@ -2,7 +2,7 @@ import json
 import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import Barrier
@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app import llm
+from app import llm, llm_usage
 from app.llm_config import model_for_task
 from app.llm_usage import _estimated_cost
 from app.database import Base
@@ -83,27 +83,23 @@ class LLMUsageTests(unittest.TestCase):
                         db, user_id, request_type, "짧은 지침", [{"role": "user", "content": "안녕"}], output_cap, task=task
                     )
 
-    def _prior_usage(self, user_id, budget_tokens):
+    def _prior_usage(self, user_id, cost_usd, *, created_at=None):
         with Session(self.engine) as db:
             db.add(
                 LLMUsage(
                     user_id=user_id,
                     request_type="chat",
-                    model="gpt-5.5",
+                    model="gpt-6-luna",
                     status="completed",
-                    input_tokens=budget_tokens,
-                    total_tokens=budget_tokens,
-                    reserved_total_tokens=budget_tokens,
-                    budget_tokens=budget_tokens,
-                    created_at=datetime.now(timezone.utc),
+                    estimated_cost_usd=cost_usd,
+                    created_at=created_at or datetime.now(timezone.utc),
                 )
             )
             db.commit()
 
     def test_below_limit_records_actual_usage_and_cost(self):
         client = self._client()
-        with patch.dict(TIER_LIMITS["free"], {"max_llm_tokens_per_day": 100, "max_llm_tokens_per_month": 1000}):
-            self.assertEqual(self._call(self.free_id, client), "OK")
+        self.assertEqual(self._call(self.free_id, client), "OK")
         with Session(self.engine) as db:
             row = db.query(LLMUsage).one()
             self.assertEqual((row.user_id, row.request_type, row.model),
@@ -112,12 +108,17 @@ class LLMUsageTests(unittest.TestCase):
             self.assertEqual((row.reserved_total_tokens, row.budget_tokens, row.status), (30, 14, "completed"))
             self.assertGreater(row.estimated_cost_usd, 0)
 
+    def test_production_cost_limits_are_exactly_fivefold(self):
+        self.assertEqual(TIER_LIMITS["free"]["max_llm_cost_usd_per_day"], Decimal("1.00"))
+        self.assertEqual(TIER_LIMITS["free"]["max_llm_cost_usd_per_month"], Decimal("20.00"))
+        self.assertEqual(TIER_LIMITS["premium"]["max_llm_cost_usd_per_day"], Decimal("5.00"))
+        self.assertEqual(TIER_LIMITS["premium"]["max_llm_cost_usd_per_month"], Decimal("100.00"))
+
     def test_analysis_routes_through_same_gateway_and_records_model_cost(self):
         client = self._client(model="gpt-6.1-sol")
-        with patch.dict(TIER_LIMITS["free"], {"max_llm_tokens_per_day": 100, "max_llm_tokens_per_month": 1000}):
-            self.assertEqual(
-                self._call(self.free_id, client, task="analysis", request_type="character_extraction"), "OK"
-            )
+        self.assertEqual(
+            self._call(self.free_id, client, task="analysis", request_type="character_extraction"), "OK"
+        )
         with Session(self.engine) as db:
             row = db.query(LLMUsage).one()
             self.assertEqual((row.request_type, row.model, row.total_tokens),
@@ -215,12 +216,14 @@ class LLMUsageTests(unittest.TestCase):
         with Session(self.engine) as db:
             row = db.query(LLMUsage).one()
             self.assertEqual((row.status, row.total_tokens, row.budget_tokens), ("failed", 0, 30))
+            self.assertEqual(row.estimated_cost_usd, Decimal("0.00022000"))
 
     def test_structured_daily_and_monthly_limits_use_existing_reservation_gate(self):
-        self._prior_usage(self.free_id, 80)
+        self._prior_usage(self.free_id, Decimal("1.00"))
         for limits, expected in [
-            ({"max_llm_tokens_per_day": 100, "max_llm_tokens_per_month": 1000}, "daily_limit_reached"),
-            ({"max_llm_tokens_per_day": 1000, "max_llm_tokens_per_month": 100}, "monthly_limit_reached"),
+            ({"max_llm_cost_usd_per_day": Decimal("1.00")}, "daily_limit_reached"),
+            ({"max_llm_cost_usd_per_day": Decimal("5.00"),
+              "max_llm_cost_usd_per_month": Decimal("1.00")}, "monthly_limit_reached"),
         ]:
             with self.subTest(expected=expected):
                 client = self._client(model="gpt-6.1-sol")
@@ -250,6 +253,107 @@ class LLMUsageTests(unittest.TestCase):
             self.assertIsNone(_estimated_cost("unpriced-model", 10, 0, 4))
         self.assertIn("unpriced-model", logged.output[0])
 
+    def test_reservation_uses_model_input_and_output_prices(self):
+        with Session(self.engine) as db:
+            user = User(email="pricing@example.invalid", password_hash="unused")
+            db.add(user)
+            db.commit()
+            user_id = user.id
+        with patch.dict(os.environ, {"OPENAI_CHAT_MODEL": "gpt-6-luna", "OPENAI_ANALYSIS_MODEL": "gpt-6.1-sol"}):
+            chat_id = llm_usage.reserve_usage(self.engine, user_id, "chat", model_for_task("chat"), 10, 20)
+            analysis_id = llm_usage.reserve_usage(
+                self.engine, user_id, "character_extraction", model_for_task("analysis"), 10, 20
+            )
+        with Session(self.engine) as db:
+            chat = db.get(LLMUsage, chat_id)
+            analysis = db.get(LLMUsage, analysis_id)
+            self.assertEqual(chat.estimated_cost_usd, Decimal("0.00001100"))
+            self.assertEqual(analysis.estimated_cost_usd, Decimal("0.00022000"))
+            self.assertEqual((chat.reserved_total_tokens, analysis.reserved_total_tokens), (30, 30))
+
+    def test_tier_daily_and_monthly_cost_boundaries(self):
+        fixed_now = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
+        reservation = Decimal("0.00001100")
+        epsilon = Decimal("0.00000001")
+        for tier, user_id in (("free", self.free_id), ("premium", self.premium_id)):
+            for period in ("day", "month"):
+                limit = TIER_LIMITS[tier][f"max_llm_cost_usd_per_{period}"]
+                created_at = fixed_now if period == "day" else fixed_now - timedelta(days=1)
+                for offset, allowed in ((-epsilon, True), (Decimal(0), True), (epsilon, False)):
+                    with self.subTest(tier=tier, period=period, offset=offset):
+                        with Session(self.engine) as db:
+                            db.query(LLMUsage).delete()
+                            db.commit()
+                        self._prior_usage(user_id, limit - reservation + offset, created_at=created_at)
+                        with patch.object(llm_usage, "datetime") as clock:
+                            clock.now.return_value = fixed_now
+                            if allowed:
+                                usage_id = llm_usage.reserve_usage(
+                                    self.engine, user_id, "chat", "gpt-6-luna", 10, 20
+                                )
+                                with Session(self.engine) as db:
+                                    self.assertEqual(db.get(LLMUsage, usage_id).estimated_cost_usd, reservation)
+                            else:
+                                with self.assertRaises(HTTPException) as caught:
+                                    llm_usage.reserve_usage(self.engine, user_id, "chat", "gpt-6-luna", 10, 20)
+                                self.assertEqual(caught.exception.status_code, 429)
+                                expected_code = "daily_limit_reached" if period == "day" else "monthly_limit_reached"
+                                self.assertEqual(caught.exception.detail["code"], expected_code)
+
+    def test_daily_and_monthly_windows_reset_in_utc(self):
+        fixed_now = datetime(2026, 10, 15, 0, 0, tzinfo=timezone.utc)
+        self._prior_usage(self.free_id, Decimal("1.00"), created_at=fixed_now - timedelta(seconds=1))
+        with patch.object(llm_usage, "datetime") as clock:
+            clock.now.return_value = fixed_now
+            usage_id = llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        with Session(self.engine) as db:
+            self.assertIsNotNone(db.get(LLMUsage, usage_id))
+
+        with Session(self.engine) as db:
+            db.query(LLMUsage).delete()
+            db.commit()
+        month_start = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        self._prior_usage(self.free_id, Decimal("20.00"), created_at=month_start - timedelta(seconds=1))
+        with patch.object(llm_usage, "datetime") as clock:
+            clock.now.return_value = month_start
+            usage_id = llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        with Session(self.engine) as db:
+            self.assertIsNotNone(db.get(LLMUsage, usage_id))
+
+    def test_actual_cost_reconciliation_releases_unused_reservation(self):
+        client = self._client()
+        # One chat reserves $0.000011, then settles at $0.000003. A second
+        # reservation fits only after that settlement.
+        with patch.dict(TIER_LIMITS["free"], {"max_llm_cost_usd_per_day": Decimal("0.00001400")}):
+            self.assertEqual(self._call(self.free_id, client), "OK")
+            self.assertEqual(self._call(self.free_id, client), "OK")
+        with Session(self.engine) as db:
+            rows = db.query(LLMUsage).all()
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(row.estimated_cost_usd == Decimal("0.00000300") for row in rows))
+
+    def test_unbilled_failure_releases_cost_and_unknown_usage_keeps_reservation(self):
+        first_id = llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        llm_usage.record_failure(self.engine, first_id, "BadRequest", definitely_unbilled=True)
+        second_id = llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        llm_usage.record_response(self.engine, second_id, SimpleNamespace(usage=None))
+        with Session(self.engine) as db:
+            first = db.get(LLMUsage, first_id)
+            second = db.get(LLMUsage, second_id)
+            self.assertEqual((first.budget_tokens, first.estimated_cost_usd), (0, Decimal(0)))
+            self.assertEqual(second.status, "usage_unavailable")
+            self.assertEqual(second.estimated_cost_usd, Decimal("0.00001100"))
+
+    def test_unpriced_provider_response_keeps_original_reservation(self):
+        usage_id = llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        response = self._client(model="unpriced-model").responses.create.return_value
+        with self.assertLogs(level="WARNING"):
+            llm_usage.record_response(self.engine, usage_id, response)
+        with Session(self.engine) as db:
+            row = db.get(LLMUsage, usage_id)
+            self.assertEqual(row.model, "unpriced-model")
+            self.assertEqual(row.estimated_cost_usd, Decimal("0.00001100"))
+
     def test_usage_cost_uses_response_model_even_if_requested_model_differs(self):
         client = self._client(model="gpt-6.1-sol")
         self._call(self.free_id, client, task="chat", request_type="chat")
@@ -260,10 +364,11 @@ class LLMUsageTests(unittest.TestCase):
             self.assertEqual(row.estimated_cost_usd, Decimal("0.00006000"))
 
     def test_analysis_daily_and_monthly_limits_block_before_generation(self):
-        self._prior_usage(self.free_id, 80)
+        self._prior_usage(self.free_id, Decimal("1.00"))
         for limits, expected in [
-            ({"max_llm_tokens_per_day": 100, "max_llm_tokens_per_month": 1000}, "daily_limit_reached"),
-            ({"max_llm_tokens_per_day": 1000, "max_llm_tokens_per_month": 100}, "monthly_limit_reached"),
+            ({"max_llm_cost_usd_per_day": Decimal("1.00")}, "daily_limit_reached"),
+            ({"max_llm_cost_usd_per_day": Decimal("5.00"),
+              "max_llm_cost_usd_per_month": Decimal("1.00")}, "monthly_limit_reached"),
         ]:
             with self.subTest(expected=expected):
                 client = self._client(model="gpt-6.1-sol")
@@ -303,19 +408,18 @@ class LLMUsageTests(unittest.TestCase):
                 self.assertNotIn("import openai", service.read_text(encoding="utf-8"))
 
     def test_daily_limit_blocks_before_generation(self):
-        self._prior_usage(self.free_id, 80)
+        self._prior_usage(self.free_id, Decimal("1.00"))
         client = self._client()
-        with patch.dict(TIER_LIMITS["free"], {"max_llm_tokens_per_day": 100, "max_llm_tokens_per_month": 1000}):
-            with self.assertRaises(HTTPException) as caught:
-                self._call(self.free_id, client)
+        with self.assertRaises(HTTPException) as caught:
+            self._call(self.free_id, client)
         self.assertEqual(caught.exception.status_code, 429)
         self.assertEqual(caught.exception.detail["code"], "daily_limit_reached")
         client.responses.create.assert_not_called()
 
     def test_monthly_limit_blocks_before_generation(self):
-        self._prior_usage(self.free_id, 80)
+        self._prior_usage(self.free_id, Decimal("20.00"))
         client = self._client()
-        with patch.dict(TIER_LIMITS["free"], {"max_llm_tokens_per_day": 1000, "max_llm_tokens_per_month": 100}):
+        with patch.dict(TIER_LIMITS["free"], {"max_llm_cost_usd_per_day": Decimal("25.00")}):
             with self.assertRaises(HTTPException) as caught:
                 self._call(self.free_id, client)
         self.assertEqual(caught.exception.status_code, 429)
@@ -323,12 +427,10 @@ class LLMUsageTests(unittest.TestCase):
         client.responses.create.assert_not_called()
 
     def test_free_and_premium_limits_differ(self):
-        with patch.dict(TIER_LIMITS["free"], {"max_llm_tokens_per_day": 20, "max_llm_tokens_per_month": 100}):
-            with patch.dict(TIER_LIMITS["premium"],
-                            {"max_llm_tokens_per_day": 100, "max_llm_tokens_per_month": 1000}):
-                with self.assertRaises(HTTPException):
-                    self._call(self.free_id, self._client())
-                self.assertEqual(self._call(self.premium_id, self._client()), "OK")
+        self._prior_usage(self.free_id, Decimal("1.00"))
+        with self.assertRaises(HTTPException):
+            self._call(self.free_id, self._client())
+        self.assertEqual(self._call(self.premium_id, self._client()), "OK")
 
     def test_unknown_provider_failure_keeps_reserved_budget_but_no_actual_usage(self):
         client = self._client()
@@ -338,6 +440,7 @@ class LLMUsageTests(unittest.TestCase):
         with Session(self.engine) as db:
             row = db.query(LLMUsage).one()
             self.assertEqual((row.status, row.total_tokens, row.budget_tokens), ("failed", 0, 30))
+            self.assertEqual(row.estimated_cost_usd, Decimal("0.00001100"))
             self.assertEqual(row.error_type, "RuntimeError")
 
     def test_token_count_failure_is_logged_without_generation(self):
@@ -348,6 +451,7 @@ class LLMUsageTests(unittest.TestCase):
         with Session(self.engine) as db:
             row = db.query(LLMUsage).one()
             self.assertEqual((row.status, row.total_tokens, row.budget_tokens), ("preflight_failed", 0, 0))
+            self.assertIsNone(row.estimated_cost_usd)
         client.responses.create.assert_not_called()
 
     def test_global_output_cap_blocks_before_openai_request(self):
@@ -397,7 +501,7 @@ class LLMUsageTests(unittest.TestCase):
             except HTTPException as exc:
                 return exc.detail["code"]
 
-        with patch.dict(TIER_LIMITS["free"], {"max_llm_tokens_per_day": 30, "max_llm_tokens_per_month": 100}):
+        with patch.dict(TIER_LIMITS["free"], {"max_llm_cost_usd_per_day": Decimal("0.00001100")}):
             with patch.dict(os.environ, {"OPENAI_CHAT_MODEL": "gpt-6-luna", "OPENAI_API_KEY": ""}):
                 with patch.object(llm, "_get_client", return_value=client):
                     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -416,7 +520,7 @@ class LLMUsageTests(unittest.TestCase):
             db.add(conversation)
             db.commit()
             conversation_id = conversation.id
-        self._prior_usage(self.free_id, 80)
+        self._prior_usage(self.free_id, Decimal("1.00"))
         client = self._client()
 
         def test_db():
@@ -428,7 +532,7 @@ class LLMUsageTests(unittest.TestCase):
         try:
             with patch.object(main, "engine", self.engine):
                 with patch.dict(TIER_LIMITS["free"],
-                                {"max_llm_tokens_per_day": 100, "max_llm_tokens_per_month": 1000}):
+                                {"max_llm_cost_usd_per_day": Decimal("1.00")}):
                     with patch.dict(os.environ, {"OPENAI_CHAT_MODEL": "gpt-6-luna", "OPENAI_API_KEY": ""}):
                         with patch.object(llm, "_get_client", return_value=client):
                             with TestClient(main.app) as api:

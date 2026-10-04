@@ -51,7 +51,7 @@ def make_chat_input_counter(db: Session, user_id: str, output_cap: int) -> Calla
         raise HTTPException(status_code=413, detail={"code": "llm_output_too_large"})
     model = model_for_task("chat")
     bind = db.get_bind()
-    check_capacity(bind, user_id, output_cap)
+    check_capacity(bind, user_id, model, output_cap)
     client = _get_client()
 
     def count(instructions: str, input_messages: list[dict]) -> int:
@@ -154,7 +154,7 @@ def _generate_response(
     text_config = {"format": type_to_text_format_param(response_model)} if response_model else None
     client = _get_client()
     bind = db.get_bind()
-    check_capacity(bind, user_id, max_output_tokens)
+    check_capacity(bind, user_id, model, max_output_tokens)
     # Exact preflight count lets the reservation cover input plus the full output cap.
     try:
         input_tokens = _count_input_tokens(client, model, instructions, input_messages, text_config)

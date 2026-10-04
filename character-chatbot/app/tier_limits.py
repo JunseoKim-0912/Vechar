@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from .models import User, ExportLog, ImportLog
@@ -12,8 +13,8 @@ TIER_LIMITS = {
         "max_corrections_per_day": 5,
         "max_exports_per_month": 5,
         "max_imports_per_month": 5,
-        "max_llm_tokens_per_day": 25000,
-        "max_llm_tokens_per_month": 100000,
+        "max_llm_cost_usd_per_day": Decimal("1.00"),
+        "max_llm_cost_usd_per_month": Decimal("20.00"),
     },
     "premium": {
         "max_worlds": 5,
@@ -21,8 +22,8 @@ TIER_LIMITS = {
         "max_corrections_per_day": 25,
         "max_exports_per_month": 10,
         "max_imports_per_month": 10,
-        "max_llm_tokens_per_day": 250000,
-        "max_llm_tokens_per_month": 1000000,
+        "max_llm_cost_usd_per_day": Decimal("5.00"),
+        "max_llm_cost_usd_per_month": Decimal("100.00"),
     },
 }
 

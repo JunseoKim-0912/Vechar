@@ -265,6 +265,8 @@ class LLMUsage(Base):
     cached_input_tokens = Column(Integer, nullable=False, default=0)
     reserved_total_tokens = Column(Integer, nullable=False, default=0)
     budget_tokens = Column(Integer, nullable=False, default=0)
+    # Reserved upper-bound cost until provider usage arrives; actual estimated cost afterward.
+    # Unknown billing outcomes retain the reservation to avoid understating the limit.
     estimated_cost_usd = Column(Numeric(12, 8), nullable=True)
     error_type = Column(String, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)

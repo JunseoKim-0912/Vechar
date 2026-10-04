@@ -1,4 +1,5 @@
 import unittest
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -93,6 +94,7 @@ class UsageLockingTests(unittest.TestCase):
         db.execute.assert_not_called()
         db.add.assert_called_once()
         self.assertIsInstance(db.add.call_args.args[0], LLMUsage)
+        self.assertEqual(db.add.call_args.args[0].estimated_cost_usd, Decimal("0.000011"))
         db.commit.assert_called_once_with()
 
 
