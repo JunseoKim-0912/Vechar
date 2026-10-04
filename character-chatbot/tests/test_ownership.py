@@ -100,9 +100,10 @@ class OwnershipRouteTests(unittest.TestCase):
         self.assertEqual(conversation_response.status_code, 201)
         conversation_id = conversation_response.json()["id"]
         with patch.object(chat_service, "generate_text", return_value="Mock reply") as generate:
-            message_response = self._post_as_alice(
-                f"/chat/conversations/{conversation_id}/messages", {"content": "Hello"}
-            )
+            with patch.object(chat_service, "make_chat_input_counter", return_value=lambda instructions, messages: 100):
+                message_response = self._post_as_alice(
+                    f"/chat/conversations/{conversation_id}/messages", {"content": "Hello"}
+                )
         self.assertEqual(message_response.status_code, 200)
         self.assertEqual(message_response.json()["content"], "Mock reply")
         self.assertIn("Alice setting", generate.call_args.kwargs["instructions"])

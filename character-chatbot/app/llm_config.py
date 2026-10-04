@@ -1,4 +1,13 @@
+import os
 from decimal import Decimal
+from typing import Literal
+
+ModelTask = Literal["analysis", "chat"]
+
+MODEL_ENV_VARS = {
+    "analysis": "OPENAI_ANALYSIS_MODEL",
+    "chat": "OPENAI_CHAT_MODEL",
+}
 
 # Provisional server-side safety limits. Review before production rollout.
 # The existing largest service request needs 8,000 output tokens for a full world profile.
@@ -6,8 +15,19 @@ MAX_LLM_OUTPUT_TOKENS = 8000
 MAX_LLM_INPUT_BYTES = 60000
 
 # USD per 1M text tokens. Estimates only: no regional uplift or non-text/tool fees.
-# Update this mapping when model pricing changes or OPENAI_MODEL is changed.
+# Standard, short-context text prices: https://developers.openai.com/api/docs/models
+# Keep historical prices for previously recorded usage; update when API pricing changes.
 MODEL_PRICES_USD_PER_MILLION = {
+    "gpt-6.1-sol": {
+        "input": Decimal("2.00"),
+        "cached_input": Decimal("0.10"),
+        "output": Decimal("10.00"),
+    },
+    "gpt-6-luna": {
+        "input": Decimal("0.10"),
+        "cached_input": Decimal("0.01"),
+        "output": Decimal("0.50"),
+    },
     "gpt-5.5": {
         "input": Decimal("5.00"),
         "cached_input": Decimal("0.50"),
@@ -19,3 +39,18 @@ MODEL_PRICES_USD_PER_MILLION = {
         "output": Decimal("30.00"),
     },
 }
+
+
+def model_for_task(task: ModelTask) -> str:
+    """Resolve a workload role without coupling services to provider model IDs."""
+    try:
+        env_var = MODEL_ENV_VARS[task]
+    except KeyError as exc:
+        raise ValueError(f"Unknown LLM task: {task}") from exc
+
+    model = os.getenv(env_var, "").strip()
+    if not model:
+        raise RuntimeError(f"{env_var} is not set. Check your .env file.")
+    if model not in MODEL_PRICES_USD_PER_MILLION:
+        raise RuntimeError(f"No pricing configured for {env_var} model: {model}")
+    return model

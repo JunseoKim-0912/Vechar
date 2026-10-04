@@ -1,8 +1,8 @@
 import json
 from sqlalchemy.orm import Session
-from ..llm import generate_text
+from ..llm import generate_structured
 from ..models import CharacterProfile, CharacterProfileHistory, CorrectionLog, ChangeReason
-from ..schemas import CharacterProfileData
+from ..schemas import CharacterProfileData, CharacterSynthesisResult
 
 
 # 가드레일 모듈
@@ -95,10 +95,11 @@ def merge_training_source(
         return _snapshot_and_save(db, character_id, initial, ChangeReason.TRAINING_INGEST)
 
     # 두 번째 소스부터는 기존 요약과 새 요약을 자연스럽게 통합하도록 LLM에 위임합니다.
-    response_text = generate_text(
+    synthesized = generate_structured(
         db=db,
         user_id=user_id,
         request_type="character_synthesis",
+        task="analysis",
         instructions=SYNTHESIS_SYSTEM_PROMPT,
         input_messages=[
             {
@@ -119,13 +120,13 @@ def merge_training_source(
             }
         ],
         max_output_tokens=1500,
+        response_model=CharacterSynthesisResult,
     )
-    synthesized = json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
 
     final_data = merged_arrays_only.model_copy(
         update={
-            "personality_summary": synthesized.get("personality_summary") or existing_data.personality_summary,
-            "speech_style": synthesized.get("speech_style") or existing_data.speech_style,
+            "personality_summary": synthesized.personality_summary or existing_data.personality_summary,
+            "speech_style": synthesized.speech_style or existing_data.speech_style,
         }
     )
     return _snapshot_and_save(db, character_id, final_data, ChangeReason.TRAINING_INGEST)
@@ -155,10 +156,11 @@ def apply_user_correction(db: Session, user_id: str, character_id: str, user_ins
         CharacterProfileData.model_validate(existing_row.data) if existing_row else CharacterProfileData()
     )
 
-    response_text = generate_text(
+    parsed = generate_structured(
         db=db,
         user_id=user_id,
         request_type="character_correction",
+        task="analysis",
         instructions=CORRECTION_SYSTEM_PROMPT,
         input_messages=[
             {
@@ -170,9 +172,7 @@ def apply_user_correction(db: Session, user_id: str, character_id: str, user_ins
             }
         ],
         max_output_tokens=4000,
-    )
-    parsed = CharacterProfileData.model_validate(
-        json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
+        response_model=CharacterProfileData,
     )
 
     updated = _snapshot_and_save(db, character_id, parsed, ChangeReason.USER_CORRECTION)

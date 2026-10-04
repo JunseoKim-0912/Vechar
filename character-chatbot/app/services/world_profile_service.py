@@ -1,8 +1,8 @@
 import json
 from sqlalchemy.orm import Session
-from ..llm import generate_text
+from ..llm import generate_text, generate_structured
 from ..models import World, WorldProfile, WorldProfileHistory, ChangeReason
-from ..schemas import WorldProfileData, MentionedCharacter
+from ..schemas import WorldProfileData, MentionedCharacter, WorldCharacterRankingResult, WorldSynthesisResult
 
 # 가드레일 모듈 (World 버전)
 # -----------------
@@ -103,18 +103,17 @@ def _rank_and_dedupe_characters(
     if not combined:
         return []
 
-    response_text = generate_text(
+    ranked = generate_structured(
         db=db,
         user_id=user_id,
         request_type="world_character_ranking",
+        task="analysis",
         instructions=CHARACTER_RANKING_SYSTEM_PROMPT,
         input_messages=[{"role": "user", "content": json.dumps({"characters": combined}, ensure_ascii=False)}],
         max_output_tokens=1500,
+        response_model=WorldCharacterRankingResult,
     )
-    parsed = json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
-    cleaned_raw = parsed.get("mentioned_characters", combined)
-    cleaned = [MentionedCharacter.model_validate(c) for c in cleaned_raw]
-    return cleaned[:20]
+    return ranked.mentioned_characters[:20]
 
 WORLD_SYNTHESIS_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. 기존 세계관 요약과 새로 추출된 정보가 주어지면,
 둘을 자연스럽게 통합한 하나의 요약을 만듭니다. 서로 다른 시리즈/시기의 내용이 섞여 있어도 요약 안에서
@@ -146,10 +145,11 @@ def merge_world_source(
         initial = merged_arrays_only.model_copy(update={"world_summary": newly_extracted.world_summary})
         return _snapshot_and_save(db, world_id, initial, ChangeReason.TRAINING_INGEST)
 
-    response_text = generate_text(
+    synthesized = generate_structured(
         db=db,
         user_id=user_id,
         request_type="world_synthesis",
+        task="analysis",
         instructions=WORLD_SYNTHESIS_SYSTEM_PROMPT,
         input_messages=[
             {
@@ -164,11 +164,11 @@ def merge_world_source(
             }
         ],
         max_output_tokens=1500,
+        response_model=WorldSynthesisResult,
     )
-    synthesized = json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
 
     final_data = merged_arrays_only.model_copy(
-        update={"world_summary": synthesized.get("world_summary") or existing_data.world_summary}
+        update={"world_summary": synthesized.world_summary or existing_data.world_summary}
     )
     return _snapshot_and_save(db, world_id, final_data, ChangeReason.TRAINING_INGEST)
 
@@ -201,10 +201,11 @@ def apply_world_edit(db: Session, user_id: str, world_id: str, operation: str, i
         WorldProfileData.model_validate(existing_row.data) if existing_row else WorldProfileData()
     )
 
-    response_text = generate_text(
+    parsed = generate_structured(
         db=db,
         user_id=user_id,
         request_type="world_edit",
+        task="analysis",
         instructions=WORLD_EDIT_SYSTEM_PROMPTS[operation] + WORLD_EDIT_JSON_SPEC,
         input_messages=[
             {
@@ -216,9 +217,7 @@ def apply_world_edit(db: Session, user_id: str, world_id: str, operation: str, i
             }
         ],
         max_output_tokens=8000,  # 세계관 프로필 전체를 다시 써야 하므로 여유 있게 (character 쪽과 같은 이유)
-    )
-    parsed = WorldProfileData.model_validate(
-        json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
+        response_model=WorldProfileData,
     )
 
     return _snapshot_and_save(db, world_id, parsed, ChangeReason.WORLD_EDIT)
@@ -239,6 +238,7 @@ def summarize_world(db: Session, user_id: str, world_id: str) -> str:
         db=db,
         user_id=user_id,
         request_type="world_summary",
+        task="analysis",
         instructions=WORLD_SUMMARY_SYSTEM_PROMPT,
         input_messages=[{"role": "user", "content": json.dumps(data.model_dump(), ensure_ascii=False)}],
         max_output_tokens=1000,
@@ -269,21 +269,20 @@ def compact_world_profile(db: Session, user_id: str, world_id: str) -> WorldProf
         raise ValueError("압축할 세계관 프로필이 없습니다.")
     existing_data = WorldProfileData.model_validate(existing_row.data)
 
-    response_text = generate_text(
+    parsed = generate_structured(
         db=db,
         user_id=user_id,
         request_type="world_compaction",
+        task="analysis",
         instructions=COMPACT_SYSTEM_PROMPT,
         input_messages=[{"role": "user", "content": json.dumps(existing_data.model_dump(), ensure_ascii=False)}],
         max_output_tokens=8000,
+        response_model=WorldProfileData,
     )
-    raw = json.loads(response_text.strip().removeprefix("```json").removesuffix("```").strip())
 
     # mentioned_characters는 COMPACT_SYSTEM_PROMPT의 결과를 믿지 않고, 전담 함수로 다시 한번 확실하게 정리
     re_ranked = _rank_and_dedupe_characters(db, user_id, existing_data.mentioned_characters, [])
-    raw["mentioned_characters"] = [c.model_dump() for c in re_ranked]
-
-    parsed = WorldProfileData.model_validate(raw)
+    parsed = parsed.model_copy(update={"mentioned_characters": re_ranked})
     return _snapshot_and_save(db, world_id, parsed, ChangeReason.WORLD_EDIT)
 
 

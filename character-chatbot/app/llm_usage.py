@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -104,6 +105,7 @@ def record_preflight_failure(bind, user_id: str, request_type: str, model: str, 
 def _estimated_cost(model: str, input_tokens: int, cached_tokens: int, output_tokens: int):
     prices = MODEL_PRICES_USD_PER_MILLION.get(model)
     if prices is None:
+        logging.warning("No configured price for reported OpenAI model %s; estimated cost unavailable", model)
         return None
     uncached = max(0, input_tokens - cached_tokens)
     return (
@@ -113,7 +115,7 @@ def _estimated_cost(model: str, input_tokens: int, cached_tokens: int, output_to
     ) / Decimal(1_000_000)
 
 
-def record_response(bind, usage_id: str, response) -> None:
+def record_response(bind, usage_id: str, response, *, output_error: str | None = None) -> None:
     """Record provider-reported tokens even when the response has no usable text."""
     with Session(bind=bind) as db:
         row = db.query(LLMUsage).filter(LLMUsage.id == usage_id).with_for_update().one()
@@ -132,9 +134,14 @@ def record_response(bind, usage_id: str, response) -> None:
             row.estimated_cost_usd = _estimated_cost(
                 row.model, row.input_tokens, row.cached_input_tokens, row.output_tokens
             )
-            row.status = "completed" if response.status == "completed" and response.output_text else "failed_response"
+            row.status = (
+                "completed" if output_error is None and response.status == "completed" and response.output_text
+                else "failed_response"
+            )
             if row.status != "completed":
-                row.error_type = response.status or "EmptyOutput"
+                row.error_type = output_error or (
+                    response.status if response.status != "completed" else "EmptyOutput"
+                )
         db.commit()
 
 

@@ -1,7 +1,5 @@
-import json
-import re
 from sqlalchemy.orm import Session
-from ..llm import generate_text
+from ..llm import generate_structured
 from ..schemas import CharacterProfileData
 
 FOCUSED_EXTRACTION_SYSTEM_PROMPT = """당신은 캐릭터 분석가입니다. 여러 개의 텍스트가 주어지고, 그 중 특정 인물 한 명에
@@ -21,26 +19,17 @@ FOCUSED_EXTRACTION_SYSTEM_PROMPT = """당신은 캐릭터 분석가입니다. �
 지목된 인물에 대한 근거를 텍스트에서 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요."""
 
 
-def _strip_code_fence(text: str) -> str:
-    return re.sub(r"^```json\s*|```\s*$", "", text.strip())
-
-
 def extract_character_from_world_text(
     db: Session, user_id: str, character_name: str, source_texts: list[str]
 ) -> CharacterProfileData:
     combined = "\n\n---\n\n".join(source_texts)
-    response_text = generate_text(
+    return generate_structured(
         db=db,
         user_id=user_id,
         request_type="world_character_extraction",
+        task="analysis",
         instructions=FOCUSED_EXTRACTION_SYSTEM_PROMPT,
         input_messages=[{"role": "user", "content": f"지목된 인물: {character_name}\n\n{combined}"}],
         max_output_tokens=4000,
+        response_model=CharacterProfileData,
     )
-    raw = _strip_code_fence(response_text)
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse focused character extraction JSON: {e}") from e
-
-    return CharacterProfileData.model_validate(parsed)

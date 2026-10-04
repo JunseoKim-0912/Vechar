@@ -15,6 +15,11 @@ class CharacterProfileData(BaseModel):
     do_not_do: list[str] = Field(default_factory=list)
 
 
+class CharacterSynthesisResult(BaseModel):
+    personality_summary: str
+    speech_style: str
+
+
 class SignupRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
@@ -85,6 +90,14 @@ class WorldProfileData(BaseModel):
     key_facts: list[str] = Field(default_factory=list)
     timeline_notes: list[str] = Field(default_factory=list)
     mentioned_characters: list[MentionedCharacter] = Field(default_factory=list)
+
+
+class WorldCharacterRankingResult(BaseModel):
+    mentioned_characters: list[MentionedCharacter]
+
+
+class WorldSynthesisResult(BaseModel):
+    world_summary: str
 
 
 

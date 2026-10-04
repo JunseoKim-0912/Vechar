@@ -18,6 +18,7 @@ from ..schemas import (
 from ..services.extraction_service import extract_profile_from_text
 from ..services.character_profile_service import merge_training_source, get_profile, set_initial_profile
 from ..services.world_profile_service import get_or_create_default_world
+from ..services import memory_service
 from ..ownership import get_owned_world
 from ..tier_limits import get_limits, check_and_log_export, check_import_quota, log_import
 
@@ -128,6 +129,15 @@ def delete_character(character_id: str, user_id: str = Depends(get_current_user_
     character = db.query(Character).filter(Character.id == character_id, Character.user_id == user_id).first()
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
+
+    # Until a durable deletion intent/outbox exists, never delete the DB scope
+    # first: a provider failure would otherwise strand external memory.
+    memory_deletion = memory_service.delete_character_memories(user_id=user_id, character_id=character_id)
+    if not memory_deletion.success:
+        raise HTTPException(
+            status_code=503 if memory_deletion.retryable else 502,
+            detail={"code": "memory_deletion_failed", "retryable": memory_deletion.retryable},
+        )
 
     db.delete(character)  # cascades to profile, training_sources, conversations, correction_logs (see models.py)
     db.commit()

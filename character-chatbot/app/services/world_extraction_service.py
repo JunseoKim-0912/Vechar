@@ -1,7 +1,5 @@
-import json
-import re
 from sqlalchemy.orm import Session
-from ..llm import generate_text
+from ..llm import generate_structured
 from ..schemas import WorldProfileData
 from ..models import WorldSourceType
 
@@ -24,10 +22,6 @@ WORLD_EXTRACTION_SYSTEM_PROMPT = """당신은 세계관 분석가입니다. 소�
 텍스트에서 근거를 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요."""
 
 
-def _strip_code_fence(text: str) -> str:
-    return re.sub(r"^```json\s*|```\s*$", "", text.strip())
-
-
 def extract_world_profile_from_text(
     db: Session,
     user_id: str,
@@ -44,19 +38,13 @@ def extract_world_profile_from_text(
     else:
         context_hint = "이 텍스트는 세계관에 대한 사용자의 직접적인 설명입니다. 등장인물 정보는 없을 수 있습니다."
 
-    response_text = generate_text(
+    return generate_structured(
         db=db,
         user_id=user_id,
         request_type="world_extraction",
+        task="analysis",
         instructions=WORLD_EXTRACTION_SYSTEM_PROMPT,
         input_messages=[{"role": "user", "content": f"{context_hint}\n\n---\n{raw_text}\n---"}],
         max_output_tokens=2000,
+        response_model=WorldProfileData,
     )
-
-    raw = _strip_code_fence(response_text)
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse world extraction JSON: {e}") from e
-
-    return WorldProfileData.model_validate(parsed)

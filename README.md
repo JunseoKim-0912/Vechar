@@ -42,7 +42,8 @@ npm run dev
 | Backend | `DATABASE_URL` | 로컬 SQLite 또는 배포용 PostgreSQL 연결 URL. 배포에는 영속적인 PostgreSQL이 필요합니다. |
 | Backend | `JWT_SECRET` | 토큰 서명 비밀 값. Vercel에서는 반드시 별도로 설정해야 합니다. |
 | Backend | `OPENAI_API_KEY` | OpenAI 호출용 비밀 값. 브라우저에 전달하지 않습니다. |
-| Backend | `OPENAI_MODEL` | 사용할 모델명. 예시는 backend `.env.example`에 있습니다. |
+| Backend | `OPENAI_ANALYSIS_MODEL` | 캐릭터·세계관 분석 및 프로필 처리용 모델. 예시는 backend `.env.example`에 있습니다. |
+| Backend | `OPENAI_CHAT_MODEL` | 실시간 캐릭터 채팅용 모델. 예시는 backend `.env.example`에 있습니다. |
 | Backend | `CORS_ORIGINS` | 허용할 프런트엔드 origin의 쉼표 구분 목록. Vercel에서는 실제 프런트엔드 URL을 명시합니다. |
 | Frontend | `VITE_API_BASE_URL` | 백엔드의 공개 base URL. 로컬 기본값은 `http://localhost:4000`입니다. |
 

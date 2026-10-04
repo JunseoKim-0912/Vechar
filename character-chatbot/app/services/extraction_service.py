@@ -1,7 +1,5 @@
-import json
-import re
 from sqlalchemy.orm import Session
-from ..llm import generate_text
+from ..llm import generate_structured
 from ..schemas import CharacterProfileData
 from ..models import SourceType
 
@@ -28,10 +26,6 @@ EXTRACTION_SYSTEM_PROMPT_TEMPLATE = """당신은 캐릭터 분석가입니다. �
 텍스트에서 근거를 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요."""
 
 
-def _strip_code_fence(text: str) -> str:
-    return re.sub(r"^```json\s*|```\s*$", "", text.strip())
-
-
 def extract_profile_from_text(
     db: Session, user_id: str, raw_text: str, source_type: SourceType, character_name: str
 ) -> CharacterProfileData:
@@ -41,19 +35,13 @@ def extract_profile_from_text(
         SourceType.STORY: "이 텍스트는 캐릭터가 등장하는 단편 소설입니다.",
     }[source_type]
 
-    response_text = generate_text(
+    return generate_structured(
         db=db,
         user_id=user_id,
         request_type="character_extraction",
+        task="analysis",
         instructions=EXTRACTION_SYSTEM_PROMPT_TEMPLATE.format(character_name=character_name),
         input_messages=[{"role": "user", "content": f"{type_hint}\n\n---\n{raw_text}\n---"}],
         max_output_tokens=2000,
+        response_model=CharacterProfileData,
     )
-
-    raw = _strip_code_fence(response_text)
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse extraction JSON: {e}") from e
-
-    return CharacterProfileData.model_validate(parsed)
