@@ -169,7 +169,13 @@ async def upload_world_source(
     db.refresh(source)
 
     try:
-        extracted = extract_world_profile_from_text(db, user_id, raw_text, source_type, series_name, episode_number)
+        existing_profile = get_world_profile(db, world.id)
+        canonical_profile = (
+            WorldProfileData.model_validate(existing_profile.data) if existing_profile else None
+        )
+        extracted = extract_world_profile_from_text(
+            db, user_id, raw_text, source_type, series_name, episode_number, canonical_profile
+        )
         source.extracted_data = extracted.model_dump()
         source.status = IngestStatus.EXTRACTED
         db.commit()

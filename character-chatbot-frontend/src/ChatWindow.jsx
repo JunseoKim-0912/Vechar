@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { API_BASE_URL } from "./api";
+import { useLocale } from "./context/LocaleContext";
 
 export default function ChatWindow({ token, conversationId }) {
+  const { locale, t } = useLocale();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
 
@@ -14,7 +16,7 @@ export default function ChatWindow({ token, conversationId }) {
     const res = await fetch(`${API_BASE_URL}/chat/conversations/${conversationId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ content: userMsg.content }),
+      body: JSON.stringify({ content: userMsg.content, locale }),
     });
     const data = await res.json();
     setMessages((prev) => [...prev, { role: data.role, content: data.content }]);
@@ -33,13 +35,13 @@ export default function ChatWindow({ token, conversationId }) {
       <div>
         {messages.map((m, i) => (
           <p key={i} style={{ fontStyle: m.role === "SYSTEM_NOTE" ? "italic" : "normal" }}>
-            <strong>{m.role === "USER" ? "나" : m.role === "SYSTEM_NOTE" ? "시스템" : "캐릭터"}:</strong>{" "}
+            <strong>{m.role === "USER" ? t("chat.me") : m.role === "SYSTEM_NOTE" ? t("chat.system") : t("chat.characterFallback")}:</strong>{" "}
             {m.content}
           </p>
         ))}
       </div>
       <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} />
-      <button onClick={send}>보내기</button>
+      <button onClick={send}>{t("chat.send")}</button>
     </div>
   );
 }

@@ -1,9 +1,13 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import { useLocale } from "../context/LocaleContext";
+import LanguageSelector from "../components/LanguageSelector";
+import { localizeError } from "../i18n/errors";
 
 export default function SignupPage() {
   const { signup } = useAuth();
+  const { t } = useLocale();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -18,7 +22,7 @@ export default function SignupPage() {
       await signup(email, password);
       navigate("/characters");
     } catch (err) {
-      setError(err.message);
+      setError(localizeError(err, t, "signup"));
     } finally {
       setLoading(false);
     }
@@ -26,14 +30,15 @@ export default function SignupPage() {
 
   return (
     <div className="auth-page">
+      <div className="auth-language"><LanguageSelector /></div>
       <form className="auth-card" onSubmit={handleSubmit}>
-        <h1>회원가입</h1>
+        <h1>{t("auth.signup")}</h1>
         <label>
-          이메일
+          {t("common.email")}
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
         </label>
         <label>
-          비밀번호 (8자 이상)
+          {t("auth.passwordHint")}
           <input
             type="password"
             value={password}
@@ -43,9 +48,9 @@ export default function SignupPage() {
           />
         </label>
         {error && <p className="form-error">{error}</p>}
-        <button type="submit" disabled={loading}>{loading ? "가입 중..." : "가입하기"}</button>
+        <button type="submit" disabled={loading}>{loading ? t("auth.signingUp") : t("auth.signup")}</button>
         <p className="auth-switch">
-          이미 계정이 있으신가요? <Link to="/login">로그인</Link>
+          {t("auth.hasAccount")} <Link to="/login">{t("auth.login")}</Link>
         </p>
       </form>
     </div>

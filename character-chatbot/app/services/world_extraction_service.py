@@ -19,7 +19,13 @@ WORLD_EXTRACTION_SYSTEM_PROMPT = """당신은 세계관 분석가입니다. 소�
   "mentioned_characters": [{"name": "대표 이름", "aliases": ["다른 이름/별명/직함"]}]
 }
 
-텍스트에서 근거를 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요."""
+텍스트에서 근거를 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요.
+
+Language policy:
+- Understand English, Korean, and mixed English/Korean source text and include facts from every language present.
+- For a new world profile, use the source's natural dominant language and style.
+- If an existing canonical world profile is supplied as a language reference, write extracted fields in that profile's dominant language and style even when the new source differs.
+- Preserve proper names, places, organizations, fictional terms, and unique objects as written; prefer an established canonical spelling when available."""
 
 
 def extract_world_profile_from_text(
@@ -29,6 +35,7 @@ def extract_world_profile_from_text(
     source_type: WorldSourceType,
     series_name: str | None,
     episode_number: int | None,
+    canonical_profile: WorldProfileData | None = None,
 ) -> WorldProfileData:
     if source_type == WorldSourceType.NOVEL_EPISODE:
         context_hint = (
@@ -44,7 +51,15 @@ def extract_world_profile_from_text(
         request_type="world_extraction",
         task="analysis",
         instructions=WORLD_EXTRACTION_SYSTEM_PROMPT,
-        input_messages=[{"role": "user", "content": f"{context_hint}\n\n---\n{raw_text}\n---"}],
+        input_messages=[{
+            "role": "user",
+            "content": (
+                f"{context_hint}\n\n"
+                f"Canonical world profile language reference (may be empty; use only for language/style and established spellings):\n"
+                f"{canonical_profile.model_dump_json() if canonical_profile else '{}'}\n\n"
+                f"Source text:\n---\n{raw_text}\n---"
+            ),
+        }],
         max_output_tokens=2000,
         response_model=WorldProfileData,
     )

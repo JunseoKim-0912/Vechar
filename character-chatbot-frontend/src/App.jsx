@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Layout from "./components/Layout";
@@ -10,6 +10,12 @@ import CharacterDetailPage from "./pages/CharacterDetailPage";
 import ChatPage from "./pages/ChatPage";
 import WorldListPage from "./pages/WorldListPage";
 import WorldDetailPage from "./pages/WorldDetailPage";
+import { useLocale } from "./context/LocaleContext";
+
+function NotFoundPage() {
+  const { t } = useLocale();
+  return <div className="empty-state"><h1>{t("notFound.title")}</h1><Link to="/characters">{t("notFound.action")}</Link></div>;
+}
 
 export default function App() {
   return (
@@ -30,6 +36,7 @@ export default function App() {
               <Route path="/worlds/:id" element={<WorldDetailPage />} />
             </Route>
           </Route>
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

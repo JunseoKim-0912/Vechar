@@ -1,21 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { useLocale } from "../context/LocaleContext";
+import { localizeError } from "../i18n/errors";
 
 export default function WorldListPage() {
+  const { t } = useLocale();
   const [worlds, setWorlds] = useState(null);
   const [error, setError] = useState("");
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState("");
+  const [importFailed, setImportFailed] = useState(false);
   const fileInputRef = useRef(null);
 
   async function load() {
     try {
       setWorlds(await api.get("/worlds/"));
     } catch (e) {
-      setError(e.message);
+      setError(localizeError(e, t));
     }
   }
 
@@ -31,19 +35,19 @@ export default function WorldListPage() {
       setNewName("");
       await load();
     } catch (e) {
-      setError(e.message);
+      setError(localizeError(e, t));
     } finally {
       setCreating(false);
     }
   }
 
   async function handleDelete(id) {
-    if (!confirm("이 세계관을 삭제할까요? (연결된 캐릭터는 사라지지 않고 세계관만 없어집니다)")) return;
+    if (!confirm(t("worlds.confirmDelete"))) return;
     try {
       await api.delete(`/worlds/${id}`);
       setWorlds((prev) => prev.filter((w) => w.id !== id));
     } catch (e) {
-      alert(e.message);
+      alert(localizeError(e, t));
     }
   }
 
@@ -54,26 +58,28 @@ export default function WorldListPage() {
 
     setImporting(true);
     setImportMessage("");
+    setImportFailed(false);
     try {
       const text = await file.text();
       const payload = JSON.parse(text);
       await api.post("/worlds/import", payload);
-      setImportMessage("가져오기 완료!");
+      setImportMessage(t("common.importComplete"));
       await load();
     } catch (err) {
-      setImportMessage(`실패: ${err.message}`);
+      setImportFailed(true);
+      setImportMessage(`${t("common.failed")}: ${localizeError(err, t)}`);
     } finally {
       setImporting(false);
     }
   }
 
   if (error) return <p className="form-error">{error}</p>;
-  if (!worlds) return <p className="loading">불러오는 중...</p>;
+  if (!worlds) return <p className="loading">{t("common.loading")}</p>;
 
   return (
     <div>
       <div className="page-header">
-        <h1>세계관</h1>
+        <h1>{t("worlds.title")}</h1>
         <div className="page-header-actions">
           <input
             ref={fileInputRef}
@@ -83,23 +89,23 @@ export default function WorldListPage() {
             style={{ display: "none" }}
           />
           <button onClick={() => fileInputRef.current?.click()} disabled={importing}>
-            {importing ? "가져오는 중..." : "가져오기"}
+            {importing ? t("common.importing") : t("common.import")}
           </button>
         </div>
       </div>
 
       {importMessage && (
-        <p className={importMessage.startsWith("실패") ? "form-error" : "form-success"}>{importMessage}</p>
+        <p className={importFailed ? "form-error" : "form-success"}>{importMessage}</p>
       )}
 
       <form onSubmit={handleCreate} className="inline-form">
         <input
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
-          placeholder="새 세계관 이름"
+          placeholder={t("worlds.newName")}
           required
         />
-        <button type="submit" disabled={creating}>+ 만들기</button>
+        <button type="submit" disabled={creating}>+ {creating ? t("common.creating") : t("common.create")}</button>
       </form>
 
       <div className="card-grid">
@@ -109,7 +115,7 @@ export default function WorldListPage() {
               <h3>{w.name}</h3>
             </Link>
             {w.name !== "현실" && (
-              <button className="link-danger" onClick={() => handleDelete(w.id)}>삭제</button>
+              <button className="link-danger" onClick={() => handleDelete(w.id)}>{t("common.delete")}</button>
             )}
           </div>
         ))}

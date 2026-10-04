@@ -17,7 +17,14 @@ CORRECTION_PREFIX = "/수정"
 
 
 
-def send_message(db: Session, character_id: str, conversation_id: str, user_message: str, user_id: str) -> dict:
+def send_message(
+    db: Session,
+    character_id: str,
+    conversation_id: str,
+    user_message: str,
+    user_id: str,
+    locale: str = "en",
+) -> dict:
     character = db.query(Character).filter(Character.id == character_id, Character.user_id == user_id).first()
     if character is None:
         raise HTTPException(status_code=404, detail="Character not found")
@@ -92,7 +99,7 @@ def send_message(db: Session, character_id: str, conversation_id: str, user_mess
     user_message_id = user_turn.id
 
     instructions = build_chat_instructions(
-        character.name, profile_data, world_data, correction_prefix=CORRECTION_PREFIX
+        character.name, profile_data, world_data, correction_prefix=CORRECTION_PREFIX, locale=locale
     )
     budget = select_chat_context(
         instructions,

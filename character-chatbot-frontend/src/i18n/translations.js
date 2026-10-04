@@ -1,0 +1,119 @@
+export const DEFAULT_LOCALE = "en";
+export const SUPPORTED_LOCALES = ["en", "ko"];
+
+export const translations = {
+  en: {
+    common: {
+      email: "Email", password: "Password", loading: "Loading...", import: "Import",
+      importing: "Importing...", importComplete: "Import complete!", export: "Export",
+      exporting: "Exporting...", delete: "Delete", create: "Create", creating: "Creating...",
+      upload: "Upload", uploading: "Uploading...", training: "Training...", trained: "Training complete!", created: "Created!", or: "or",
+      type: "Type", content: "Content", apply: "Apply", applying: "Applying...",
+      failed: "Failed", error: "Error", optional: "optional",
+    },
+    locale: { english: "English", korean: "한국어", label: "Language" },
+    nav: { characters: "Characters", worlds: "Worlds", logout: "Log out" },
+    auth: {
+      login: "Log in", loggingIn: "Logging in...", signup: "Sign up", signingUp: "Signing up...",
+      passwordHint: "Password (8+ characters)", noAccount: "New to Vechar?",
+      hasAccount: "Already have an account?",
+    },
+    characters: {
+      title: "My Characters", new: "+ New Character", createTitle: "Create Character",
+      name: "Name", image: "Profile Image (optional)", world: "World",
+      worldHint: "optional — leave blank to use Reality", reality: "Reality (default)",
+      details: "Details", empty: "No characters yet. Create your first character or import one.",
+      confirmDelete: "Delete this character?", startChat: "Start Chat", profile: "Character Profile",
+      profileRequired: "Train a profile before exporting this character.", personality: "Personality",
+      speechStyle: "Speech Style", background: "Background",
+      noTraining: "No training data yet. Add text below to get started.", train: "Train Character",
+      sourceStory: "Short Story", sourceDialogue: "Dialogue", sourceManual: "Description",
+      createFrom: "Create Character from {name}", createSelected: "Create Selected Character", exportFilenameSuffix: "character",
+    },
+    worlds: {
+      title: "Worlds", newName: "New world name", confirmDelete: "Delete this world? Linked characters will remain.",
+      knownInfo: "Known Information", noSummary: "No summary yet.", discovered: "Characters Found in This World",
+      chooseCharacter: "Choose from all characters ({count})", viewSummary: "View Prose Summary",
+      compact: "Compact", confirmCompact: "Compact this world profile? Duplicates will be cleaned up and the change can be rolled back.",
+      empty: "No training data yet.", uploadTitle: "Add World Source", episode: "Novel Episode",
+      description: "World Description", seriesName: "Series Name", episodeNumber: "Episode Number",
+      editTitle: "Edit World", operation: "Action", add: "Add", modify: "Modify", exportFilenameSuffix: "world",
+    },
+    training: {
+      file: "Upload .txt File", text: "Enter Text (up to 15,000 characters)",
+      bilingualHelp: "You can provide source material in English, Korean, or a mix of both.",
+    },
+    chat: {
+      characterFallback: "Character", me: "You", system: "System", send: "Send",
+      placeholder: "Message {name}... (use /수정 to correct the profile)",
+    },
+    errors: {
+      loginFailed: "The email or password is incorrect.", signupValidation: "Check your email and use a password with at least 8 characters.",
+      emailExists: "An account with this email already exists.", unauthorized: "Your session has expired. Please log in again.", forbidden: "This action is not available for your account.",
+      notFound: "The requested resource was not found.", dailyLimit: "You have reached today's usage limit. Try again tomorrow.",
+      monthlyLimit: "You have reached this month's usage limit.", server: "Something went wrong on the server. Please try again.",
+      generic: "Something went wrong. Please try again.",
+    },
+    notFound: { title: "Page not found", action: "Back to Characters" },
+  },
+  ko: {
+    common: {
+      email: "이메일", password: "비밀번호", loading: "불러오는 중...", import: "가져오기",
+      importing: "가져오는 중...", importComplete: "가져오기 완료!", export: "내보내기",
+      exporting: "내보내는 중...", delete: "삭제", create: "만들기", creating: "만드는 중...",
+      upload: "업로드", uploading: "업로드 중...", training: "학습 중...", trained: "학습 완료!", created: "생성 완료!", or: "또는",
+      type: "종류", content: "내용", apply: "적용하기", applying: "적용 중...",
+      failed: "실패", error: "오류", optional: "선택",
+    },
+    locale: { english: "English", korean: "한국어", label: "언어" },
+    nav: { characters: "캐릭터", worlds: "세계관", logout: "로그아웃" },
+    auth: {
+      login: "로그인", loggingIn: "로그인 중...", signup: "회원가입", signingUp: "가입 중...",
+      passwordHint: "비밀번호 (8자 이상)", noAccount: "계정이 없으신가요?",
+      hasAccount: "이미 계정이 있으신가요?",
+    },
+    characters: {
+      title: "내 캐릭터", new: "+ 새 캐릭터", createTitle: "새 캐릭터 만들기",
+      name: "이름", image: "프로필 사진 (선택)", world: "세계관",
+      worldHint: "선택 — 비워두면 현실에 배정됩니다", reality: "현실 (기본)",
+      details: "자세히", empty: "아직 만든 캐릭터가 없어요. 첫 캐릭터를 만들거나 파일을 가져와보세요.",
+      confirmDelete: "이 캐릭터를 삭제할까요?", startChat: "대화 시작하기", profile: "학습된 프로필",
+      profileRequired: "학습된 프로필이 있어야 내보낼 수 있어요.", personality: "성격",
+      speechStyle: "말투", background: "배경",
+      noTraining: "아직 학습된 내용이 없어요. 아래에서 텍스트를 추가해보세요.", train: "학습시키기",
+      sourceStory: "단편 소설", sourceDialogue: "대화 기록", sourceManual: "직접 설명",
+      createFrom: "{name}(으)로 캐릭터 만들기", createSelected: "선택한 인물로 만들기", exportFilenameSuffix: "캐릭터",
+    },
+    worlds: {
+      title: "세계관", newName: "새 세계관 이름", confirmDelete: "이 세계관을 삭제할까요? 연결된 캐릭터는 사라지지 않습니다.",
+      knownInfo: "알고 있는 정보", noSummary: "아직 요약이 없어요.", discovered: "이 세계관에서 발견된 인물",
+      chooseCharacter: "전체 목록에서 고르기 ({count}명)", viewSummary: "자연어로 요약 보기",
+      compact: "압축하기", confirmCompact: "세계관 정보를 압축할까요? 중복을 정리하며 필요하면 되돌릴 수 있어요.",
+      empty: "아직 학습된 내용이 없어요.", uploadTitle: "화/설명 업로드", episode: "소설 화",
+      description: "세계관 설명", seriesName: "시리즈 이름", episodeNumber: "화 번호",
+      editTitle: "수정하기", operation: "작업", add: "추가", modify: "수정", exportFilenameSuffix: "세계관",
+    },
+    training: {
+      file: "파일 업로드 (.txt)", text: "텍스트 직접 입력 (최대 15,000자)",
+      bilingualHelp: "영어, 한국어 또는 두 언어가 섞인 자료를 사용할 수 있습니다.",
+    },
+    chat: {
+      characterFallback: "캐릭터", me: "나", system: "시스템", send: "보내기",
+      placeholder: "{name}에게 말 걸기... (/수정으로 정정 가능)",
+    },
+    errors: {
+      loginFailed: "이메일 또는 비밀번호가 올바르지 않습니다.", signupValidation: "이메일을 확인하고 8자 이상의 비밀번호를 사용해주세요.",
+      emailExists: "이미 가입된 이메일입니다.", unauthorized: "세션이 만료되었습니다. 다시 로그인해주세요.", forbidden: "현재 계정에서는 이 작업을 할 수 없습니다.",
+      notFound: "요청한 정보를 찾을 수 없습니다.", dailyLimit: "오늘의 사용 한도에 도달했습니다. 내일 다시 시도해주세요.",
+      monthlyLimit: "이번 달 사용 한도에 도달했습니다.", server: "서버에서 오류가 발생했습니다. 다시 시도해주세요.",
+      generic: "문제가 발생했습니다. 다시 시도해주세요.",
+    },
+    notFound: { title: "페이지를 찾을 수 없습니다", action: "캐릭터 목록으로" },
+  },
+};
+
+export function translate(locale, key, values = {}) {
+  const value = key.split(".").reduce((current, part) => current?.[part], translations[locale]);
+  if (typeof value !== "string") return key;
+  return value.replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
+}

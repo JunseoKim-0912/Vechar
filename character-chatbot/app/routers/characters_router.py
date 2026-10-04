@@ -179,7 +179,13 @@ async def upload_training_source(
     db.refresh(source)
 
     try:
-        extracted = extract_profile_from_text(db, user_id, raw_text, source_type, character.name)
+        existing_profile = get_profile(db, character.id)
+        canonical_profile = (
+            CharacterProfileData.model_validate(existing_profile.data) if existing_profile else None
+        )
+        extracted = extract_profile_from_text(
+            db, user_id, raw_text, source_type, character.name, canonical_profile
+        )
         source.extracted_data = extracted.model_dump()
         source.status = IngestStatus.EXTRACTED
         db.commit()

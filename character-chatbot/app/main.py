@@ -1,7 +1,9 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from .database import Base, engine
 from .routers import auth_router, characters_router, upload_router
 from .routers import chat_router
@@ -42,6 +44,17 @@ def on_startup():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/ready")
+def ready():
+    """Database-dependent readiness without exposing connection details."""
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    return {"ready": True}
 
 
 app.include_router(auth_router.router, prefix="/auth", tags=["auth"])

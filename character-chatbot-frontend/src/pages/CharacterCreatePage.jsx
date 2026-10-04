@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { useLocale } from "../context/LocaleContext";
+import { localizeError } from "../i18n/errors";
 
 export default function CharacterCreatePage() {
+  const { t } = useLocale();
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [imageFile, setImageFile] = useState(null);
@@ -36,7 +39,7 @@ export default function CharacterCreatePage() {
 
       navigate(`/characters/${character.id}`);
     } catch (err) {
-      setError(err.message);
+      setError(localizeError(err, t));
     } finally {
       setSubmitting(false);
     }
@@ -44,22 +47,22 @@ export default function CharacterCreatePage() {
 
   return (
     <div className="form-page">
-      <h1>새 캐릭터 만들기</h1>
+      <h1>{t("characters.createTitle")}</h1>
       <form onSubmit={handleSubmit} className="stacked-form">
         <label>
-          이름
+          {t("characters.name")}
           <input value={name} onChange={(e) => setName(e.target.value)} required maxLength={50} />
         </label>
 
         <label>
-          프로필 사진 (선택)
+          {t("characters.image")}
           <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] ?? null)} />
         </label>
 
         <label>
-          세계관 (선택 — 비워두면 "현실"에 배정됩니다)
+          {t("characters.world")} ({t("characters.worldHint")})
           <select value={worldId} onChange={(e) => setWorldId(e.target.value)}>
-            <option value="">현실 (기본)</option>
+            <option value="">{t("characters.reality")}</option>
             {worlds.map((w) => (
               <option key={w.id} value={w.id}>{w.name}</option>
             ))}
@@ -68,7 +71,7 @@ export default function CharacterCreatePage() {
 
         {error && <p className="form-error">{error}</p>}
         <button type="submit" disabled={submitting}>
-          {submitting ? "만드는 중..." : "만들기"}
+          {submitting ? t("common.creating") : t("common.create")}
         </button>
       </form>
     </div>

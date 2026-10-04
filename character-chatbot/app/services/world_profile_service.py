@@ -92,7 +92,9 @@ name은 그중 가장 널리 알려진 대표 이름 하나로 정하세요.
 단역은 제외하세요. 최대 20명까지만 반환하세요.
 
 반드시 아래 JSON으로만 응답하세요. 다른 텍스트 없이 순수 JSON만 출력합니다.
-{"mentioned_characters": [{"name": "...", "aliases": ["..."]}, ...]}"""
+{"mentioned_characters": [{"name": "...", "aliases": ["..."]}, ...]}
+
+Understand English, Korean, and mixed-language entries. Prefer spellings already present in the earlier canonical entries, and never translate proper names merely to match an output language."""
 
 
 def _rank_and_dedupe_characters(
@@ -120,7 +122,9 @@ WORLD_SYNTHESIS_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. 기�
 시기 구분이 흐려지지 않도록 주의하세요.
 
 반드시 아래 JSON으로만 응답하세요. 다른 텍스트 없이 순수 JSON만 출력합니다.
-{"world_summary": "..."}"""
+{"world_summary": "..."}
+
+The existing summary is canonical. Preserve its dominant language, register, and style while understanding English, Korean, or mixed-language new information. Preserve established proper-name and fictional-term spellings, and avoid an accidental bilingual patchwork."""
 def merge_world_source(
     db: Session, user_id: str, world_id: str, newly_extracted: WorldProfileData
 ) -> WorldProfile:
@@ -188,7 +192,9 @@ WORLD_EDIT_JSON_SPEC = """
   "key_facts": ["..."],
   "timeline_notes": ["..."],
   "mentioned_characters": [{"name": "...", "aliases": ["..."]}]
-}"""
+}
+
+Language policy: understand English, Korean, or mixed-language instructions; keep the existing canonical world's dominant language and style unless the user explicitly requests a language/style change; preserve established proper-name spellings."""
 
 
 def apply_world_edit(db: Session, user_id: str, world_id: str, operation: str, instruction: str) -> WorldProfile:
@@ -224,7 +230,8 @@ def apply_world_edit(db: Session, user_id: str, world_id: str, operation: str, i
 
 
 WORLD_SUMMARY_SYSTEM_PROMPT = """당신은 세계관 안내자입니다. 주어진 구조화된 세계관 정보를 사람이 읽기 좋은
-자연스러운 문단 몇 개로 요약해서 설명하세요. 목록을 나열하듯 말하지 말고, 이야기하듯 풀어서 설명하세요."""
+자연스러운 문단 몇 개로 요약해서 설명하세요. 목록을 나열하듯 말하지 말고, 이야기하듯 풀어서 설명하세요.
+입력 canonical profile의 주 언어와 표현 스타일을 유지하고, 고유명사 표기를 바꾸지 마세요."""
 
 
 def summarize_world(db: Session, user_id: str, world_id: str) -> str:
@@ -258,7 +265,9 @@ COMPACT_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. key_facts와 
   "key_facts": ["..."],
   "timeline_notes": ["..."],
   "mentioned_characters": [{"name": "...", "aliases": ["..."]}]
-}"""
+}
+
+Understand English, Korean, and mixed-language content. Keep the existing canonical profile's dominant language and style, preserve established proper names and fictional terms, and do not create a bilingual patchwork while compacting."""
 
 
 def compact_world_profile(db: Session, user_id: str, world_id: str) -> WorldProfile:

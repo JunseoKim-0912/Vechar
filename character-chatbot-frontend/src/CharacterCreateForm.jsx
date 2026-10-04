@@ -1,14 +1,17 @@
 import { useState } from "react";
 import { API_BASE_URL } from "./api";
+import { useLocale } from "./context/LocaleContext";
+import { localizeError } from "./i18n/errors";
 
 export default function CharacterCreateForm({ token, onCreated }) {
+  const { t } = useLocale();
   const [name, setName] = useState("");
   const [imageFile, setImageFile] = useState(null);
   const [status, setStatus] = useState("");
 
   async function handleSubmit(e) {
     e.preventDefault();
-    setStatus("업로드 중...");
+    setStatus(t("common.uploading"));
 
     let profileImageUrl;
     if (imageFile) {
@@ -20,7 +23,10 @@ export default function CharacterCreateForm({ token, onCreated }) {
         body: form,
       });
       const data = await res.json();
-      if (!res.ok) return setStatus(`실패: ${data.detail}`);
+      if (!res.ok) {
+        const error = { status: res.status, code: typeof data.detail === "object" ? data.detail?.code : undefined };
+        return setStatus(`${t("common.failed")}: ${localizeError(error, t)}`);
+      }
       profileImageUrl = data.url;
     }
 
@@ -30,16 +36,19 @@ export default function CharacterCreateForm({ token, onCreated }) {
       body: JSON.stringify({ name, profile_image_url: profileImageUrl }),
     });
     const data = await res.json();
-    if (!res.ok) return setStatus(`실패: ${data.detail}`);
-    setStatus("생성 완료!");
+    if (!res.ok) {
+      const error = { status: res.status, code: typeof data.detail === "object" ? data.detail?.code : undefined };
+      return setStatus(`${t("common.failed")}: ${localizeError(error, t)}`);
+    }
+    setStatus(t("common.created"));
     onCreated?.(data);
   }
 
   return (
     <form onSubmit={handleSubmit}>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="캐릭터 이름" required />
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("characters.name")} required />
       <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] ?? null)} />
-      <button type="submit">캐릭터 만들기</button>
+      <button type="submit">{t("characters.createTitle")}</button>
       <p>{status}</p>
     </form>
   );

@@ -41,8 +41,11 @@ async function request(path, { method = "GET", body, isForm = false, auth = true
   }
 
   if (!res.ok) {
-    const message = (data && data.detail) || `요청 실패 (${res.status})`;
-    throw new Error(typeof message === "string" ? message : JSON.stringify(message));
+    const detail = data?.detail;
+    const error = new Error(typeof detail === "string" ? detail : `Request failed (${res.status})`);
+    error.status = res.status;
+    error.code = typeof detail === "object" ? detail?.code : undefined;
+    throw error;
   }
   return data;
 }

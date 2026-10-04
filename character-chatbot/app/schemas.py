@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
@@ -59,6 +59,7 @@ class CharacterDetailRead(CharacterRead):
 
 class MessageCreateRequest(BaseModel):
     content: str = Field(min_length=1)
+    locale: Literal["en", "ko"] = "en"
 
 
 class ConversationCreateRequest(BaseModel):

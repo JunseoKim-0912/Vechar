@@ -69,7 +69,7 @@ def post_message(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     try:
-        return send_message(db, conversation.character_id, conversation.id, payload.content, user_id)
+        return send_message(db, conversation.character_id, conversation.id, payload.content, user_id, payload.locale)
     except HTTPException:
         raise
     except Exception as e:

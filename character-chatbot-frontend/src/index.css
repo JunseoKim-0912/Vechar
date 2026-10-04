@@ -108,6 +108,32 @@ textarea {
   align-items: center;
   gap: 1.2rem;
 }
+
+.language-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+  color: var(--ink-soft);
+}
+
+.language-selector button {
+  padding: 0.25rem 0.35rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.language-selector button.active {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.language-selector button:hover:not(:disabled) {
+  background: transparent;
+  color: var(--ink);
+}
 .nav-links a {
   color: var(--ink);   /* var(--surface) → 변경 */
   text-decoration: none;
@@ -140,6 +166,13 @@ textarea {
   align-items: center;
   justify-content: center;
   padding: 2rem 1rem;
+  position: relative;
+}
+
+.auth-language {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
 }
 
 .auth-card {
@@ -184,6 +217,12 @@ textarea {
 .form-success {
   color: var(--success);
   font-size: 0.9rem;
+}
+
+.form-help {
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  margin-top: -0.25rem;
 }
 
 .empty-state {
@@ -425,9 +464,23 @@ textarea {
 
   .topnav {
     padding: 0.75rem 1rem;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .nav-links {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.65rem;
   }
 
   .card-grid {
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  }
+
+  .page-header-actions,
+  .world-actions,
+  .character-picker {
+    flex-wrap: wrap;
   }
 }

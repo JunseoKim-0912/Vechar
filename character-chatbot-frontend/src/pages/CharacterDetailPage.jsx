@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, downloadJSON } from "../api";
+import { useLocale } from "../context/LocaleContext";
+import { localizeError } from "../i18n/errors";
 
 export default function CharacterDetailPage() {
+  const { t } = useLocale();
   const { id } = useParams();
   const navigate = useNavigate();
   const [character, setCharacter] = useState(null);
@@ -13,6 +16,7 @@ export default function CharacterDetailPage() {
   const [file, setFile] = useState(null);
   const [training, setTraining] = useState(false);
   const [trainMessage, setTrainMessage] = useState("");
+  const [trainFailed, setTrainFailed] = useState(false);
 
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
@@ -21,7 +25,7 @@ export default function CharacterDetailPage() {
     try {
       setCharacter(await api.get(`/characters/${id}`));
     } catch (e) {
-      setError(e.message);
+      setError(localizeError(e, t));
     }
   }
 
@@ -34,6 +38,7 @@ export default function CharacterDetailPage() {
     e.preventDefault();
     setTraining(true);
     setTrainMessage("");
+    setTrainFailed(false);
     try {
       const form = new FormData();
       form.append("source_type", sourceType);
@@ -41,12 +46,13 @@ export default function CharacterDetailPage() {
       else form.append("text", text);
 
       await api.post(`/characters/${id}/training-sources`, form, { isForm: true });
-      setTrainMessage("학습 완료!");
+      setTrainMessage(t("common.trained"));
       setText("");
       setFile(null);
       await loadCharacter();
     } catch (err) {
-      setTrainMessage(`실패: ${err.message}`);
+      setTrainFailed(true);
+      setTrainMessage(`${t("common.failed")}: ${localizeError(err, t)}`);
     } finally {
       setTraining(false);
     }
@@ -57,7 +63,7 @@ export default function CharacterDetailPage() {
       const conversation = await api.post("/chat/conversations", { character_id: id });
       navigate(`/chat/${id}`, { state: { conversationId: conversation.id } });
     } catch (e) {
-      alert(e.message);
+      alert(localizeError(e, t));
     }
   }
 
@@ -66,16 +72,16 @@ export default function CharacterDetailPage() {
     setExportError("");
     try {
       const data = await api.get(`/characters/${id}/export`);
-      downloadJSON(data, `${character.name}_캐릭터.json`);
+      downloadJSON(data, `${character.name}_${t("characters.exportFilenameSuffix")}.json`);
     } catch (e) {
-      setExportError(e.message);
+      setExportError(localizeError(e, t));
     } finally {
       setExporting(false);
     }
   }
 
   if (error) return <p className="form-error">{error}</p>;
-  if (!character) return <p className="loading">불러오는 중...</p>;
+  if (!character) return <p className="loading">{t("common.loading")}</p>;
 
   const profile = character.profile?.data;
 
@@ -85,51 +91,52 @@ export default function CharacterDetailPage() {
         <h1>{character.name}</h1>
         <div className="page-header-actions">
           <button onClick={handleExport} disabled={exporting || !profile}>
-            {exporting ? "내보내는 중..." : "내보내기"}
+            {exporting ? t("common.exporting") : t("common.export")}
           </button>
-          <button className="btn-primary" onClick={startChat}>대화 시작하기</button>
+          <button className="btn-primary" onClick={startChat}>{t("characters.startChat")}</button>
         </div>
       </div>
       {exportError && <p className="form-error">{exportError}</p>}
-      {!profile && <p className="empty-state">학습된 프로필이 있어야 내보낼 수 있어요.</p>}
+      {!profile && <p className="empty-state">{t("characters.profileRequired")}</p>}
 
       <section className="profile-summary">
-        <h2>학습된 프로필</h2>
+        <h2>{t("characters.profile")}</h2>
         {profile ? (
           <dl>
-            <dt>성격</dt>
+            <dt>{t("characters.personality")}</dt>
             <dd>{profile.personality_summary || "-"}</dd>
-            <dt>말투</dt>
+            <dt>{t("characters.speechStyle")}</dt>
             <dd>{profile.speech_style || "-"}</dd>
-            <dt>배경</dt>
+            <dt>{t("characters.background")}</dt>
             <dd>{profile.background_facts?.join(" · ") || "-"}</dd>
           </dl>
         ) : (
-          <p className="empty-state">아직 학습된 내용이 없어요. 아래에서 텍스트를 추가해보세요.</p>
+          <p className="empty-state">{t("characters.noTraining")}</p>
         )}
       </section>
 
       <section>
-        <h2>학습시키기</h2>
+        <h2>{t("characters.train")}</h2>
+        <p className="form-help">{t("training.bilingualHelp")}</p>
         <form onSubmit={handleTrain} className="stacked-form">
           <label>
-            종류
+            {t("common.type")}
             <select value={sourceType} onChange={(e) => setSourceType(e.target.value)}>
-              <option value="STORY">단편 소설</option>
-              <option value="DIALOGUE">대화 기록</option>
-              <option value="MANUAL_DESCRIPTION">직접 설명</option>
+              <option value="STORY">{t("characters.sourceStory")}</option>
+              <option value="DIALOGUE">{t("characters.sourceDialogue")}</option>
+              <option value="MANUAL_DESCRIPTION">{t("characters.sourceManual")}</option>
             </select>
           </label>
 
           <label>
-            파일 업로드 (.txt)
+            {t("training.file")}
             <input type="file" accept=".txt" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </label>
 
-          <p className="or-divider">또는</p>
+          <p className="or-divider">{t("common.or")}</p>
 
           <label>
-            텍스트 직접 입력 (최대 15,000자)
+            {t("training.text")}
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -140,10 +147,10 @@ export default function CharacterDetailPage() {
           </label>
 
           {trainMessage && (
-            <p className={trainMessage.startsWith("실패") ? "form-error" : "form-success"}>{trainMessage}</p>
+            <p className={trainFailed ? "form-error" : "form-success"}>{trainMessage}</p>
           )}
           <button type="submit" disabled={training || (!file && !text.trim())}>
-            {training ? "학습 중..." : "학습시키기"}
+            {training ? t("common.training") : t("characters.train")}
           </button>
         </form>
       </section>

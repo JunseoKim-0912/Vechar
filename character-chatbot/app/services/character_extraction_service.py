@@ -18,6 +18,14 @@ FOCUSED_EXTRACTION_SYSTEM_PROMPT = """당신은 캐릭터 분석가입니다. �
 
 지목된 인물에 대한 근거를 텍스트에서 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요."""
 
+FOCUSED_EXTRACTION_SYSTEM_PROMPT += """
+
+Language policy:
+- Understand English, Korean, and mixed English/Korean text, including facts split across languages.
+- This creates a new canonical profile, so use the source material's natural dominant language and style while incorporating evidence from every language present.
+- Preserve proper names and fictional terms as written. Do not translate names merely to match the output language.
+- Keep sample_dialogues in their original quotation language."""
+
 
 def extract_character_from_world_text(
     db: Session, user_id: str, character_name: str, source_texts: list[str]

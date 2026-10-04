@@ -23,11 +23,23 @@ EXTRACTION_SYSTEM_PROMPT_TEMPLATE = """당신은 캐릭터 분석가입니다. �
   "do_not_do": []
 }}
 
-텍스트에서 근거를 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요."""
+텍스트에서 근거를 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요.
+
+Language policy:
+- Understand English, Korean, and mixed English/Korean source text; extract evidence from every language present.
+- For a new profile, write the profile in the source's natural dominant language and style. For a genuinely mixed source, choose a coherent dominant language without dropping facts from the other language.
+- If an existing canonical profile is supplied as a language reference, write new profile fields in that profile's dominant language and style even when the new source uses another language.
+- Preserve proper names, place names, organizations, fictional terms, and unique objects as written; prefer an established spelling from the canonical profile when available.
+- Keep sample_dialogues faithful to the original quotation language rather than translating them."""
 
 
 def extract_profile_from_text(
-    db: Session, user_id: str, raw_text: str, source_type: SourceType, character_name: str
+    db: Session,
+    user_id: str,
+    raw_text: str,
+    source_type: SourceType,
+    character_name: str,
+    canonical_profile: CharacterProfileData | None = None,
 ) -> CharacterProfileData:
     type_hint = {
         SourceType.MANUAL_DESCRIPTION: "이 텍스트는 사용자가 캐릭터에 대해 직접 설명한 내용입니다.",
@@ -41,7 +53,15 @@ def extract_profile_from_text(
         request_type="character_extraction",
         task="analysis",
         instructions=EXTRACTION_SYSTEM_PROMPT_TEMPLATE.format(character_name=character_name),
-        input_messages=[{"role": "user", "content": f"{type_hint}\n\n---\n{raw_text}\n---"}],
+        input_messages=[{
+            "role": "user",
+            "content": (
+                f"{type_hint}\n\n"
+                f"Canonical profile language reference (may be empty; use only for language/style and established spellings):\n"
+                f"{canonical_profile.model_dump_json() if canonical_profile else '{}'}\n\n"
+                f"Source text:\n---\n{raw_text}\n---"
+            ),
+        }],
         max_output_tokens=2000,
         response_model=CharacterProfileData,
     )

@@ -62,7 +62,12 @@ SYNTHESIS_SYSTEM_PROMPT = """당신은 캐릭터 프로필 편집자입니다. �
 더 최근에 제공된 정보(새 정보)를 우선하되 기존 정보를 함부로 버리지 마세요.
 
 반드시 아래 JSON으로만 응답하세요. 다른 텍스트 없이 순수 JSON만 출력합니다.
-{"personality_summary": "...", "speech_style": "..."}"""
+{"personality_summary": "...", "speech_style": "..."}
+
+Language policy:
+- The existing profile is canonical. Keep its dominant language, register, and writing style even if the new information is in another language.
+- Understand English, Korean, and mixed-language input without omitting facts.
+- Preserve established spellings for names and fictional terms. Do not create an English/Korean patchwork unless the canonical profile itself intentionally uses both."""
 
 
 def merge_training_source(
@@ -146,7 +151,12 @@ CORRECTION_SYSTEM_PROMPT = """당신은 캐릭터 프로필 편집자입니다. 
   "relationships": ["..."],
   "sample_dialogues": ["..."],
   "do_not_do": ["..."]
-}"""
+}
+
+Language policy:
+- Understand correction instructions in English, Korean, or both.
+- Keep the existing canonical profile's dominant language and style unless the user explicitly asks to change that canonical language or style.
+- Preserve established spellings of proper names and fictional terms."""
 
 
 def apply_user_correction(db: Session, user_id: str, character_id: str, user_instruction: str) -> CharacterProfile:

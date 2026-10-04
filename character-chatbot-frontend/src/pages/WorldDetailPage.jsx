@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, downloadJSON } from "../api";
+import { useLocale } from "../context/LocaleContext";
+import { localizeError } from "../i18n/errors";
 
 export default function WorldDetailPage() {
+  const { t } = useLocale();
   const { id } = useParams();
   const navigate = useNavigate();
   const [world, setWorld] = useState(null);
@@ -15,6 +18,7 @@ export default function WorldDetailPage() {
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
+  const [uploadFailed, setUploadFailed] = useState(false);
 
   const [editOp, setEditOp] = useState("add");
   const [editInstruction, setEditInstruction] = useState("");
@@ -32,7 +36,7 @@ export default function WorldDetailPage() {
     try {
       setWorld(await api.get(`/worlds/${id}`));
     } catch (e) {
-      setError(e.message);
+      setError(localizeError(e, t));
     }
   }
 
@@ -45,6 +49,7 @@ export default function WorldDetailPage() {
     e.preventDefault();
     setUploading(true);
     setUploadMessage("");
+    setUploadFailed(false);
     try {
       const form = new FormData();
       form.append("source_type", sourceType);
@@ -56,12 +61,13 @@ export default function WorldDetailPage() {
       else form.append("text", text);
 
       await api.post(`/worlds/${id}/sources`, form, { isForm: true });
-      setUploadMessage("학습 완료!");
+      setUploadMessage(t("common.trained"));
       setText("");
       setFile(null);
       await load();
     } catch (err) {
-      setUploadMessage(`실패: ${err.message}`);
+      setUploadFailed(true);
+      setUploadMessage(`${t("common.failed")}: ${localizeError(err, t)}`);
     } finally {
       setUploading(false);
     }
@@ -75,7 +81,7 @@ export default function WorldDetailPage() {
       setEditInstruction("");
       await load();
     } catch (e) {
-      alert(e.message);
+      alert(localizeError(e, t));
     } finally {
       setEditing(false);
     }
@@ -87,19 +93,19 @@ export default function WorldDetailPage() {
       const res = await api.get(`/worlds/${id}/summary`);
       setSummary(res.summary);
     } catch (e) {
-      setSummary(`오류: ${e.message}`);
+      setSummary(`${t("common.error")}: ${localizeError(e, t)}`);
     } finally {
       setSummaryLoading(false);
     }
   }
 
   async function handleCompact() {
-    if (!confirm("세계관 정보를 압축할까요? (중복 정리, 필요하면 되돌릴 수 있어요)")) return;
+    if (!confirm(t("worlds.confirmCompact"))) return;
     try {
       await api.post(`/worlds/${id}/compact`);
       await load();
     } catch (e) {
-      alert(e.message);
+      alert(localizeError(e, t));
     }
   }
 
@@ -110,7 +116,7 @@ export default function WorldDetailPage() {
       const character = await api.post(`/worlds/${id}/extract-character`, { name });
       navigate(`/characters/${character.id}`);
     } catch (e) {
-      alert(e.message);
+      alert(localizeError(e, t));
     } finally {
       setExtractingCharacter(false);
     }
@@ -121,16 +127,16 @@ export default function WorldDetailPage() {
     setExportError("");
     try {
       const data = await api.get(`/worlds/${id}/export`);
-      downloadJSON(data, `${world.name}_세계관.json`);
+      downloadJSON(data, `${world.name}_${t("worlds.exportFilenameSuffix")}.json`);
     } catch (e) {
-      setExportError(e.message);
+      setExportError(localizeError(e, t));
     } finally {
       setExporting(false);
     }
   }
 
   if (error) return <p className="form-error">{error}</p>;
-  if (!world) return <p className="loading">불러오는 중...</p>;
+  if (!world) return <p className="loading">{t("common.loading")}</p>;
 
   const profile = world.profile?.data;
 
@@ -139,16 +145,16 @@ export default function WorldDetailPage() {
       <div className="page-header">
         <h1>{world.name}</h1>
         <button onClick={handleExport} disabled={exporting || !profile}>
-          {exporting ? "내보내는 중..." : "내보내기"}
+          {exporting ? t("common.exporting") : t("common.export")}
         </button>
       </div>
       {exportError && <p className="form-error">{exportError}</p>}
 
       <section className="profile-summary">
-        <h2>알고 있는 정보</h2>
+        <h2>{t("worlds.knownInfo")}</h2>
         {profile ? (
           <>
-            <p>{profile.world_summary || "아직 요약이 없어요."}</p>
+            <p>{profile.world_summary || t("worlds.noSummary")}</p>
 
             {profile.key_facts?.length > 0 && (
               <ul>
@@ -160,10 +166,10 @@ export default function WorldDetailPage() {
 
             {profile.mentioned_characters?.length > 0 && (
               <div className="suggested-characters">
-                <h3>이 세계관에서 발견된 인물</h3>
+                <h3>{t("worlds.discovered")}</h3>
                 {profile.mentioned_characters.slice(0, 5).map((mc) => (
                   <button key={mc.name} onClick={() => handleExtractCharacter(mc.name)} disabled={extractingCharacter}>
-                    {extractingCharacter ? "만드는 중..." : `${mc.name}(으)로 캐릭터 만들기`}
+                    {extractingCharacter ? t("common.creating") : t("characters.createFrom", { name: mc.name })}
                   </button>
                 ))}
               </div>
@@ -176,7 +182,7 @@ export default function WorldDetailPage() {
                   onChange={(e) => setSelectedCharacterName(e.target.value)}
                   disabled={extractingCharacter}
                 >
-                  <option value="">전체 목록에서 고르기 ({profile.mentioned_characters.length}명)</option>
+                  <option value="">{t("worlds.chooseCharacter", { count: profile.mentioned_characters.length })}</option>
                   {profile.mentioned_characters.map((mc) => (
                     <option key={mc.name} value={mc.name}>
                       {mc.name}
@@ -187,43 +193,44 @@ export default function WorldDetailPage() {
                   onClick={() => selectedCharacterName && handleExtractCharacter(selectedCharacterName)}
                   disabled={!selectedCharacterName || extractingCharacter}
                 >
-                  {extractingCharacter ? "만드는 중..." : "선택한 인물로 만들기"}
+                  {extractingCharacter ? t("common.creating") : t("characters.createSelected")}
                 </button>
               </div>
             )}
 
             <div className="world-actions">
               <button onClick={handleSummary} disabled={summaryLoading}>
-                {summaryLoading ? "불러오는 중..." : "자연어로 요약 보기"}
+                {summaryLoading ? t("common.loading") : t("worlds.viewSummary")}
               </button>
-              <button onClick={handleCompact}>압축하기</button>
+              <button onClick={handleCompact}>{t("worlds.compact")}</button>
             </div>
             {summary && <p className="world-summary-prose">{summary}</p>}
           </>
         ) : (
-          <p className="empty-state">아직 학습된 내용이 없어요.</p>
+          <p className="empty-state">{t("worlds.empty")}</p>
         )}
       </section>
 
       <section>
-        <h2>화/설명 업로드</h2>
+        <h2>{t("worlds.uploadTitle")}</h2>
+        <p className="form-help">{t("training.bilingualHelp")}</p>
         <form onSubmit={handleUpload} className="stacked-form">
           <label>
-            종류
+            {t("common.type")}
             <select value={sourceType} onChange={(e) => setSourceType(e.target.value)}>
-              <option value="NOVEL_EPISODE">소설 화</option>
-              <option value="DESCRIPTION">세계관 설명</option>
+              <option value="NOVEL_EPISODE">{t("worlds.episode")}</option>
+              <option value="DESCRIPTION">{t("worlds.description")}</option>
             </select>
           </label>
 
           {sourceType === "NOVEL_EPISODE" && (
             <>
               <label>
-                시리즈 이름
+                {t("worlds.seriesName")}
                 <input value={seriesName} onChange={(e) => setSeriesName(e.target.value)} required />
               </label>
               <label>
-                화 번호
+                {t("worlds.episodeNumber")}
                 <input
                   type="number"
                   min="1"
@@ -236,14 +243,14 @@ export default function WorldDetailPage() {
           )}
 
           <label>
-            파일 업로드 (.txt)
+            {t("training.file")}
             <input type="file" accept=".txt" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </label>
 
-          <p className="or-divider">또는</p>
+          <p className="or-divider">{t("common.or")}</p>
 
           <label>
-            텍스트 직접 입력 (최대 15,000자)
+            {t("training.text")}
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -254,30 +261,30 @@ export default function WorldDetailPage() {
           </label>
 
           {uploadMessage && (
-            <p className={uploadMessage.startsWith("실패") ? "form-error" : "form-success"}>{uploadMessage}</p>
+            <p className={uploadFailed ? "form-error" : "form-success"}>{uploadMessage}</p>
           )}
           <button type="submit" disabled={uploading || (!file && !text.trim())}>
-            {uploading ? "학습 중..." : "업로드"}
+            {uploading ? t("common.training") : t("common.upload")}
           </button>
         </form>
       </section>
 
       <section>
-        <h2>수정하기</h2>
+        <h2>{t("worlds.editTitle")}</h2>
         <form onSubmit={handleEdit} className="stacked-form">
           <label>
-            작업
+            {t("worlds.operation")}
             <select value={editOp} onChange={(e) => setEditOp(e.target.value)}>
-              <option value="add">추가</option>
-              <option value="delete">삭제</option>
-              <option value="modify">수정</option>
+              <option value="add">{t("worlds.add")}</option>
+              <option value="delete">{t("common.delete")}</option>
+              <option value="modify">{t("worlds.modify")}</option>
             </select>
           </label>
           <label>
-            내용
+            {t("common.content")}
             <input value={editInstruction} onChange={(e) => setEditInstruction(e.target.value)} required />
           </label>
-          <button type="submit" disabled={editing}>{editing ? "적용 중..." : "적용하기"}</button>
+          <button type="submit" disabled={editing}>{editing ? t("common.applying") : t("common.apply")}</button>
         </form>
       </section>
     </div>
