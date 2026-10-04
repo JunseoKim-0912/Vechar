@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user_id
@@ -17,6 +16,7 @@ from ..schemas import (
 )
 from ..services.extraction_service import extract_profile_from_text
 from ..services.character_profile_service import merge_training_source, get_profile, set_initial_profile
+from ..training_source import parse_training_request
 from ..services.world_profile_service import get_or_create_default_world
 from ..services import memory_service
 from ..ownership import get_owned_world
@@ -24,7 +24,6 @@ from ..tier_limits import get_limits, check_and_log_export, check_import_quota, 
 
 router = APIRouter()
 
-MAX_SOURCE_CHARS = 15000
 
 
 @router.post("/", response_model=CharacterRead, status_code=201)
@@ -147,9 +146,7 @@ def delete_character(character_id: str, user_id: str = Depends(get_current_user_
 @router.post("/{character_id}/training-sources", status_code=201)
 async def upload_training_source(
     character_id: str,
-    source_type: SourceType = Form(...),
-    text: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
+    request: Request,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
@@ -157,15 +154,12 @@ async def upload_training_source(
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
 
-    raw_text = (await file.read()).decode("utf-8") if file else text
-    if not raw_text or not raw_text.strip():
-        raise HTTPException(status_code=400, detail="No text provided (file or text field)")
-    if len(raw_text) > MAX_SOURCE_CHARS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"텍스트는 {MAX_SOURCE_CHARS}자를 초과할 수 없습니다 (현재 {len(raw_text)}자). "
-            f"여러 화로 나눠서 업로드해 주세요.",
-        )
+    fields = await parse_training_request(request)
+    try:
+        source_type = SourceType(fields["source_type"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail={"code": "malformed_training_request"}) from exc
+    raw_text = fields["raw_text"]
 
     source = TrainingSource(
         character_id=character.id,

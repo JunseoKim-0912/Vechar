@@ -111,10 +111,14 @@ def _estimated_cost(model: str, input_tokens: int, cached_tokens: int, output_to
         logging.warning("No configured price for reported OpenAI model %s; estimated cost unavailable", model)
         return None
     uncached = max(0, input_tokens - cached_tokens)
+    threshold = prices.get("long_context_threshold")
+    long_context = threshold is not None and input_tokens > threshold
+    input_multiplier = prices["long_context_input_multiplier"] if long_context else Decimal(1)
+    output_multiplier = prices["long_context_output_multiplier"] if long_context else Decimal(1)
     return (
-        Decimal(uncached) * prices["input"]
-        + Decimal(cached_tokens) * prices["cached_input"]
-        + Decimal(output_tokens) * prices["output"]
+        (Decimal(uncached) * prices["input"] + Decimal(cached_tokens) * prices["cached_input"])
+        * input_multiplier
+        + Decimal(output_tokens) * prices["output"] * output_multiplier
     ) / Decimal(1_000_000)
 
 

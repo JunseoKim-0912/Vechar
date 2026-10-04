@@ -1,7 +1,7 @@
 import os
 import json
 from collections.abc import Callable
-from typing import TypeVar, cast
+from typing import Literal, TypeVar, cast
 
 from fastapi import HTTPException
 from openai import APIStatusError, OpenAI
@@ -9,7 +9,10 @@ from openai.lib._parsing._responses import type_to_text_format_param
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from .llm_config import MAX_LLM_INPUT_BYTES, MAX_LLM_OUTPUT_TOKENS, ModelTask, model_for_task
+from .llm_config import (
+    MAX_LLM_INPUT_BYTES, MAX_LLM_OUTPUT_TOKENS, MAX_TRAINING_INPUT_BYTES,
+    MAX_TRAINING_INPUT_TOKENS, ModelTask, model_for_task,
+)
 from .llm_usage import check_capacity, record_failure, record_preflight_failure, record_response, reserve_usage
 
 StructuredResult = TypeVar("StructuredResult", bound=BaseModel)
@@ -90,11 +93,12 @@ def generate_structured(
     *,
     task: ModelTask,
     response_model: type[StructuredResult],
+    input_policy: Literal["standard", "training"] = "standard",
 ) -> StructuredResult:
     """Return a validated Pydantic result through the same metered gateway."""
     return cast(StructuredResult, _generate_response(
         db, user_id, request_type, instructions, input_messages, max_output_tokens,
-        task=task, response_model=response_model,
+        task=task, response_model=response_model, input_policy=input_policy,
     ))
 
 
@@ -141,12 +145,14 @@ def _generate_response(
     *,
     task: ModelTask,
     response_model: type[BaseModel] | None = None,
+    input_policy: Literal["standard", "training"] = "standard",
 ) -> str | BaseModel:
     model = model_for_task(task)
     if not 0 < max_output_tokens <= MAX_LLM_OUTPUT_TOKENS:
         raise HTTPException(status_code=413, detail={"code": "llm_output_too_large"})
     input_bytes = input_size_bytes(instructions, input_messages)
-    if input_bytes > MAX_LLM_INPUT_BYTES:
+    input_byte_limit = MAX_TRAINING_INPUT_BYTES if input_policy == "training" else MAX_LLM_INPUT_BYTES
+    if input_bytes > input_byte_limit:
         raise HTTPException(status_code=413, detail={"code": "llm_input_too_large"})
 
     # The pinned SDK converts the Pydantic model to its strict Responses text format.
@@ -161,6 +167,9 @@ def _generate_response(
     except Exception as exc:
         record_preflight_failure(bind, user_id, request_type, model, type(exc).__name__)
         raise
+    if input_policy == "training" and input_tokens + max_output_tokens > MAX_TRAINING_INPUT_TOKENS:
+        record_preflight_failure(bind, user_id, request_type, model, "TrainingContextTooLarge")
+        raise HTTPException(status_code=413, detail={"code": "training_context_too_large"})
     usage_id = reserve_usage(bind, user_id, request_type, model, input_tokens, max_output_tokens)
 
     try:

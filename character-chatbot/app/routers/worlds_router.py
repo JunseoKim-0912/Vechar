@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user_id
@@ -28,12 +27,12 @@ from ..services.world_profile_service import (
 )
 from ..services.character_extraction_service import extract_character_from_world_text
 from ..services.character_profile_service import set_initial_profile
+from ..training_source import parse_training_request
 from ..tier_limits import get_limits, check_and_log_export, check_import_quota, log_import
 from ..schemas import WorldProfileData, MentionedCharacter
 
 router = APIRouter()
 
-MAX_SOURCE_CHARS = 15000
 VALID_OPERATIONS = {"add", "delete", "modify"}
 
 
@@ -134,11 +133,7 @@ def delete_world(world_id: str, user_id: str = Depends(get_current_user_id), db:
 @router.post("/{world_id}/sources", status_code=201)
 async def upload_world_source(
     world_id: str,
-    source_type: WorldSourceType = Form(...),
-    series_name: Optional[str] = Form(None),
-    episode_number: Optional[int] = Form(None),
-    text: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
+    request: Request,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
@@ -146,14 +141,16 @@ async def upload_world_source(
     if not world:
         raise HTTPException(status_code=404, detail="World not found")
 
-    raw_text = (await file.read()).decode("utf-8") if file else text
-    if not raw_text or not raw_text.strip():
-        raise HTTPException(status_code=400, detail="No text provided (file or text field)")
-    if len(raw_text) > MAX_SOURCE_CHARS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"텍스트는 {MAX_SOURCE_CHARS}자를 초과할 수 없습니다 (현재 {len(raw_text)}자). 화를 나눠서 업로드해 주세요.",
-        )
+    fields = await parse_training_request(request)
+    try:
+        source_type = WorldSourceType(fields["source_type"])
+        series_name = fields.get("series_name")
+        if series_name is not None and not isinstance(series_name, str):
+            raise TypeError("series_name must be text")
+        episode_number = int(fields["episode_number"]) if fields.get("episode_number") else None
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail={"code": "malformed_training_request"}) from exc
+    raw_text = fields["raw_text"]
 
     source = WorldSource(
         world_id=world.id,

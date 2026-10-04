@@ -114,6 +114,56 @@ class LLMUsageTests(unittest.TestCase):
         self.assertEqual(TIER_LIMITS["premium"]["max_llm_cost_usd_per_day"], Decimal("5.00"))
         self.assertEqual(TIER_LIMITS["premium"]["max_llm_cost_usd_per_month"], Decimal("100.00"))
 
+    def test_large_analysis_pricing_uses_central_long_context_rates(self):
+        self.assertEqual(_estimated_cost("gpt-6.1-sol", 272_000, 0, 2_000), Decimal("0.564"))
+        self.assertEqual(_estimated_cost("gpt-6.1-sol", 272_001, 0, 2_000), Decimal("1.118004"))
+        with self.assertRaises(HTTPException) as caught:
+            llm_usage.reserve_usage(self.engine, self.free_id, "character_extraction", "gpt-6.1-sol", 273_000, 20)
+        self.assertEqual(caught.exception.detail["code"], "daily_limit_reached")
+        usage_id = llm_usage.reserve_usage(
+            self.engine, self.premium_id, "character_extraction", "gpt-6.1-sol", 273_000, 20
+        )
+        with Session(self.engine) as db:
+            self.assertEqual(db.get(LLMUsage, usage_id).estimated_cost_usd, Decimal("1.09230000"))
+
+    def test_large_training_input_uses_analysis_gateway_and_preserves_usage_accounting(self):
+        profile = CharacterProfileData(personality_summary="Mock analysis")
+        client = self._client(input_tokens=200_000, output_text=profile.model_dump_json(), model="gpt-6.1-sol")
+        with Session(self.engine) as db:
+            with patch.dict(os.environ, {"OPENAI_ANALYSIS_MODEL": "gpt-6.1-sol", "OPENAI_API_KEY": ""}):
+                with patch.object(llm, "_get_client", return_value=client):
+                    result = llm.generate_structured(
+                        db, self.free_id, "character_extraction", "training",
+                        [{"role": "user", "content": "가" * 300_000}], 20,
+                        task="analysis", response_model=CharacterProfileData, input_policy="training",
+                    )
+        self.assertEqual(result.personality_summary, "Mock analysis")
+        client.responses.input_tokens.count.assert_called_once()
+        client.responses.create.assert_called_once()
+        with Session(self.engine) as db:
+            row = db.query(LLMUsage).one()
+            self.assertEqual((row.model, row.input_tokens, row.output_tokens, row.total_tokens),
+                             ("gpt-6.1-sol", 200_000, 4, 200_004))
+            self.assertEqual(row.estimated_cost_usd, Decimal("0.40004000"))
+
+    def test_training_context_limit_blocks_generation_after_exact_count(self):
+        client = self._client(input_tokens=1_000_000, model="gpt-6.1-sol")
+        with Session(self.engine) as db:
+            with patch.dict(os.environ, {"OPENAI_ANALYSIS_MODEL": "gpt-6.1-sol", "OPENAI_API_KEY": ""}):
+                with patch.object(llm, "_get_client", return_value=client):
+                    with self.assertRaises(HTTPException) as caught:
+                        llm.generate_structured(
+                            db, self.free_id, "world_extraction", "training",
+                            [{"role": "user", "content": "가" * 300_000}], 20,
+                            task="analysis", response_model=WorldProfileData, input_policy="training",
+                        )
+        self.assertEqual(caught.exception.status_code, 413)
+        self.assertEqual(caught.exception.detail["code"], "training_context_too_large")
+        client.responses.create.assert_not_called()
+        with Session(self.engine) as db:
+            row = db.query(LLMUsage).one()
+            self.assertEqual((row.status, row.error_type), ("preflight_failed", "TrainingContextTooLarge"))
+
     def test_analysis_routes_through_same_gateway_and_records_model_cost(self):
         client = self._client(model="gpt-6.1-sol")
         self.assertEqual(

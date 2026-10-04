@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, downloadJSON } from "../api";
 import { useLocale } from "../context/LocaleContext";
 import { localizeError } from "../i18n/errors";
+import { trainingRequestBody } from "../trainingSource";
 
 export default function WorldDetailPage() {
   const { t } = useLocale();
@@ -16,6 +17,7 @@ export default function WorldDetailPage() {
   const [episodeNumber, setEpisodeNumber] = useState("");
   const [text, setText] = useState("");
   const [file, setFile] = useState(null);
+  const fileInput = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
   const [uploadFailed, setUploadFailed] = useState(false);
@@ -51,23 +53,16 @@ export default function WorldDetailPage() {
     setUploadMessage("");
     setUploadFailed(false);
     try {
-      const form = new FormData();
-      form.append("source_type", sourceType);
-      if (sourceType === "NOVEL_EPISODE") {
-        form.append("series_name", seriesName);
-        form.append("episode_number", episodeNumber);
-      }
-      if (file) form.append("file", file);
-      else form.append("text", text);
-
-      await api.post(`/worlds/${id}/sources`, form, { isForm: true });
+      const body = await trainingRequestBody({ sourceType, seriesName, episodeNumber, text, file });
+      await api.post(`/worlds/${id}/sources`, body);
       setUploadMessage(t("common.trained"));
       setText("");
       setFile(null);
+      if (fileInput.current) fileInput.current.value = "";
       await load();
     } catch (err) {
       setUploadFailed(true);
-      setUploadMessage(`${t("common.failed")}: ${localizeError(err, t)}`);
+      setUploadMessage(`${t("common.failed")}: ${localizeError(err, t, "training")}`);
     } finally {
       setUploading(false);
     }
@@ -244,7 +239,7 @@ export default function WorldDetailPage() {
 
           <label>
             {t("training.file")}
-            <input type="file" accept=".txt" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <input ref={fileInput} type="file" accept=".txt" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </label>
 
           <p className="or-divider">{t("common.or")}</p>
@@ -255,7 +250,6 @@ export default function WorldDetailPage() {
               value={text}
               onChange={(e) => setText(e.target.value)}
               rows={6}
-              maxLength={15000}
               disabled={Boolean(file)}
             />
           </label>

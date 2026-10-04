@@ -62,4 +62,5 @@ def extract_world_profile_from_text(
         }],
         max_output_tokens=2000,
         response_model=WorldProfileData,
+        input_policy="training",
     )

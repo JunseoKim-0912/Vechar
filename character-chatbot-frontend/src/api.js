@@ -1,5 +1,5 @@
 export const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_BASE || "http://localhost:4000"
+  import.meta.env?.VITE_API_BASE_URL || import.meta.env?.VITE_API_BASE || "http://localhost:4000"
 ).replace(/\/+$/, "");
 
 export function apiAssetUrl(url) {
@@ -23,7 +23,7 @@ async function request(path, { method = "GET", body, isForm = false, auth = true
   }
 
   let fetchBody = body;
-  if (body !== undefined && !isForm) {
+  if (body !== undefined && !isForm && !(body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
     fetchBody = JSON.stringify(body);
   }

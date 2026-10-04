@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, downloadJSON } from "../api";
 import { useLocale } from "../context/LocaleContext";
 import { localizeError } from "../i18n/errors";
+import { trainingRequestBody } from "../trainingSource";
 
 export default function CharacterDetailPage() {
   const { t } = useLocale();
@@ -14,6 +15,7 @@ export default function CharacterDetailPage() {
   const [sourceType, setSourceType] = useState("STORY");
   const [text, setText] = useState("");
   const [file, setFile] = useState(null);
+  const fileInput = useRef(null);
   const [training, setTraining] = useState(false);
   const [trainMessage, setTrainMessage] = useState("");
   const [trainFailed, setTrainFailed] = useState(false);
@@ -40,19 +42,16 @@ export default function CharacterDetailPage() {
     setTrainMessage("");
     setTrainFailed(false);
     try {
-      const form = new FormData();
-      form.append("source_type", sourceType);
-      if (file) form.append("file", file);
-      else form.append("text", text);
-
-      await api.post(`/characters/${id}/training-sources`, form, { isForm: true });
+      const body = await trainingRequestBody({ sourceType, text, file });
+      await api.post(`/characters/${id}/training-sources`, body);
       setTrainMessage(t("common.trained"));
       setText("");
       setFile(null);
+      if (fileInput.current) fileInput.current.value = "";
       await loadCharacter();
     } catch (err) {
       setTrainFailed(true);
-      setTrainMessage(`${t("common.failed")}: ${localizeError(err, t)}`);
+      setTrainMessage(`${t("common.failed")}: ${localizeError(err, t, "training")}`);
     } finally {
       setTraining(false);
     }
@@ -130,7 +129,7 @@ export default function CharacterDetailPage() {
 
           <label>
             {t("training.file")}
-            <input type="file" accept=".txt" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <input ref={fileInput} type="file" accept=".txt" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </label>
 
           <p className="or-divider">{t("common.or")}</p>
@@ -141,7 +140,6 @@ export default function CharacterDetailPage() {
               value={text}
               onChange={(e) => setText(e.target.value)}
               rows={6}
-              maxLength={15000}
               disabled={Boolean(file)}
             />
           </label>

@@ -13,6 +13,12 @@ MODEL_ENV_VARS = {
 # The existing largest service request needs 8,000 output tokens for a full world profile.
 MAX_LLM_OUTPUT_TOKENS = 8000
 MAX_LLM_INPUT_BYTES = 60000
+# JSON-serialized training input can expand control characters to six bytes each.
+# Chat keeps its separate 60 KB guard.
+MAX_TRAINING_INPUT_BYTES = 2_000_000
+# Current ANALYSIS model has a 1,050,000-token context. Leave room for output
+# and request overhead, using the provider's exact preflight token count.
+MAX_TRAINING_INPUT_TOKENS = 1_000_000
 
 # USD per 1M text tokens. Estimates only: no regional uplift or non-text/tool fees.
 # Standard, short-context text prices: https://developers.openai.com/api/docs/models
@@ -22,6 +28,10 @@ MODEL_PRICES_USD_PER_MILLION = {
         "input": Decimal("2.00"),
         "cached_input": Decimal("0.10"),
         "output": Decimal("10.00"),
+        # Provider bills the entire request at these rates above 272K input tokens.
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": Decimal("2"),
+        "long_context_output_multiplier": Decimal("1.5"),
     },
     "gpt-6-luna": {
         "input": Decimal("0.10"),

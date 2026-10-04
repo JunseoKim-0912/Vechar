@@ -64,4 +64,5 @@ def extract_profile_from_text(
         }],
         max_output_tokens=2000,
         response_model=CharacterProfileData,
+        input_policy="training",
     )

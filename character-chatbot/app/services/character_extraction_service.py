@@ -40,4 +40,5 @@ def extract_character_from_world_text(
         input_messages=[{"role": "user", "content": f"지목된 인물: {character_name}\n\n{combined}"}],
         max_output_tokens=4000,
         response_model=CharacterProfileData,
+        input_policy="training",
     )
