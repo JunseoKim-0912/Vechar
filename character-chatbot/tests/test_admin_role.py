@@ -3,8 +3,10 @@
 import contextlib
 import io
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import jwt
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +14,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
+from app.auth import JWT_ALGORITHM, JWT_SECRET, issue_token
 from app.main import app
 from app.models import User, UserRole
 from app.scripts import set_user_role
@@ -60,6 +63,44 @@ class AdminRoleTests(unittest.TestCase):
             db.add(admin)
             db.commit()
             self.assertEqual(get_limits(db, admin.id), TIER_LIMITS["free"])
+
+    def test_current_user_returns_only_safe_identity_fields_including_db_role(self):
+        with Session(self.engine) as db:
+            admin = User(email="admin@example.invalid", password_hash="never-expose-this",
+                         role=UserRole.ADMIN.value, is_premium=True)
+            db.add(admin)
+            db.commit()
+            admin_id = admin.id
+
+        response = self.client.get("/auth/me", headers={
+            "Authorization": f"Bearer {issue_token(admin_id)}",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "id": admin_id,
+            "email": "admin@example.invalid",
+            "role": "admin",
+        })
+
+    def test_client_supplied_role_claim_cannot_override_database_role(self):
+        with Session(self.engine) as db:
+            user = User(email="user@example.invalid", password_hash="unused")
+            db.add(user)
+            db.commit()
+            user_id = user.id
+
+        claimed_admin_token = jwt.encode({
+            "user_id": user_id,
+            "role": "admin",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }, JWT_SECRET, algorithm=JWT_ALGORITHM)
+        response = self.client.get("/auth/me", headers={
+            "Authorization": f"Bearer {claimed_admin_token}",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["role"], "user")
 
     def test_invalid_role_is_rejected_by_database_constraint(self):
         with Session(self.engine) as db:

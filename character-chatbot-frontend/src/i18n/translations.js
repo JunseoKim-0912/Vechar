@@ -12,7 +12,7 @@ export const translations = {
       failed: "Failed", error: "Error", optional: "optional",
     },
     locale: { english: "English", korean: "한국어", label: "Language" },
-    nav: { characters: "Characters", worlds: "Worlds", logout: "Log out" },
+    nav: { characters: "Characters", worlds: "Worlds", logout: "Log out", adminBadge: "Admin" },
     auth: {
       login: "Log in", loggingIn: "Logging in...", signup: "Sign up", signingUp: "Signing up...",
       passwordHint: "Password (8+ characters)", noAccount: "New to Vechar?",
@@ -75,7 +75,7 @@ export const translations = {
       failed: "실패", error: "오류", optional: "선택",
     },
     locale: { english: "English", korean: "한국어", label: "언어" },
-    nav: { characters: "캐릭터", worlds: "세계관", logout: "로그아웃" },
+    nav: { characters: "캐릭터", worlds: "세계관", logout: "로그아웃", adminBadge: "관리자" },
     auth: {
       login: "로그인", loggingIn: "로그인 중...", signup: "회원가입", signingUp: "가입 중...",
       passwordHint: "비밀번호 (8자 이상)", noAccount: "계정이 없으신가요?",

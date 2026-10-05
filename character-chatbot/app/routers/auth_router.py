@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User
-from ..schemas import SignupRequest, TokenResponse
-from ..auth import hash_password, verify_password, issue_token
+from ..schemas import CurrentUserResponse, SignupRequest, TokenResponse
+from ..auth import get_current_user_id, hash_password, verify_password, issue_token
 
 router = APIRouter()
 
@@ -27,3 +27,11 @@ def login(payload: SignupRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
     return TokenResponse(token=issue_token(user.id))
+
+
+@router.get("/me", response_model=CurrentUserResponse)
+def current_user(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user

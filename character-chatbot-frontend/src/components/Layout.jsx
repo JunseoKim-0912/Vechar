@@ -1,10 +1,11 @@
 import { Link, Outlet } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useLocale } from "../context/LocaleContext";
+import { isAdminUser } from "../authUser";
 import LanguageSelector from "./LanguageSelector";
 
 export default function Layout() {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const { t } = useLocale();
 
   return (
@@ -14,6 +15,12 @@ export default function Layout() {
         <div className="nav-links">
           <Link to="/characters">{t("nav.characters")}</Link>
           <Link to="/worlds">{t("nav.worlds")}</Link>
+          {user?.email && (
+            <span className="nav-account">
+              <span>{user.email}</span>
+              {isAdminUser(user) && <span className="admin-badge">{t("nav.adminBadge")}</span>}
+            </span>
+          )}
           <LanguageSelector />
           <button onClick={logout} className="nav-logout">{t("nav.logout")}</button>
         </div>

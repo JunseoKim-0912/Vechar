@@ -106,6 +106,13 @@ class TokenResponse(BaseModel):
     token: str
 
 
+class CurrentUserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    email: str
+    role: Literal["user", "admin"]
+
+
 class CharacterCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=50)
     profile_image_url: Optional[str] = None
