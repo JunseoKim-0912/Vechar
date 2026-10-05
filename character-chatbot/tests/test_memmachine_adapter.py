@@ -70,6 +70,8 @@ class FakeMemory:
         self.add_calls = []
         self.error = None
         self.fail_second_add = False
+        self.stored = []
+        self.scope_metadata = {}
 
     def search(self, *args, **kwargs):
         self.search_calls.append((args, kwargs))
@@ -81,7 +83,28 @@ class FakeMemory:
         self.add_calls.append(kwargs)
         if self.fail_second_add and len(self.add_calls) == 2:
             raise requests.Timeout("fake timeout")
+        self.stored.append(SimpleNamespace(uid=f"new-{len(self.add_calls)}",
+                                           metadata={**self.scope_metadata, **kwargs["metadata"]}))
         return [SimpleNamespace(uid=f"new-{len(self.add_calls)}")]
+
+    def get_context(self):
+        return {"metadata": self.scope_metadata}
+
+    def list(self, *, filter_dict=None, **kwargs):
+        items = [item for item in self.stored if all(
+            item.metadata.get(key) == value for key, value in self.scope_metadata.items()
+        )]
+        if filter_dict:
+            items = [item for item in items if all(
+                item.metadata.get(key.removeprefix("metadata.")) == value
+                for key, value in filter_dict.items()
+            )]
+        return SimpleNamespace(status=0, content=SimpleNamespace(episodic_memory=items))
+
+    def delete_episodic(self, *, episodic_id="", episodic_ids=None, **kwargs):
+        ids = {episodic_id} | set(episodic_ids or [])
+        self.stored = [item for item in self.stored if item.uid not in ids]
+        return True
 
     def get_episodic_memory_config(self, *, timeout):
         return self.episodic_config
@@ -97,6 +120,7 @@ class FakeProject:
     def memory(self, *, metadata):
         if metadata:
             self.contexts.append(metadata)
+            self.memory_object.scope_metadata = metadata
         return self.memory_object
 
 
@@ -230,7 +254,7 @@ class MemMachineAdapterTests(unittest.TestCase):
         self.assertEqual((result.success, result.candidate_count, result.error_type),
                          (False, 0, "ConnectionError"))
 
-    def test_configuration_mismatch_is_not_a_graceful_fallback(self):
+    def test_project_configuration_mismatch_degrades_retrieval(self):
         memory = FakeMemory()
         memory.episodic_config.short_term_memory_enabled = True
         client = FakeClient(FakeProject(memory))
@@ -238,10 +262,11 @@ class MemMachineAdapterTests(unittest.TestCase):
             memory_service, "_memmachine_adapter",
             side_effect=lambda: MemMachineAdapter(config(), client=client),
         ):
-            with self.assertRaises(MemoryConfigurationError):
-                memory_service.retrieve_for_turn(
+            with self.assertLogs(memory_service.logger, level="WARNING"):
+                result = memory_service.retrieve_for_turn(
                     user_id="u1", character_id="c1", conversation_id="s1", current_message="hello",
                 )
+        self.assertEqual((result.success, result.error_type), (False, "MemoryConfigurationError"))
 
     def test_cross_session_scope_and_long_term_episode_mapping(self):
         result = search_result([episode(1)], semantic=[])
@@ -278,7 +303,9 @@ class MemMachineAdapterTests(unittest.TestCase):
                 self.contexts.append(metadata)
                 if not metadata or (metadata.get("user_id") == "user:u1" and
                                     metadata.get("agent_id") == "character:c1"):
+                    memory.scope_metadata = metadata
                     return memory
+                empty_memory.scope_metadata = metadata
                 return empty_memory
 
         project = ScopedProject(memory)
@@ -441,6 +468,42 @@ class MemMachineAdapterTests(unittest.TestCase):
             self.assertEqual(call["metadata"]["user_message_id"], "um1")
             self.assertEqual(call["metadata"]["assistant_message_id"], "am1")
 
+    def test_source_metadata_avoids_duplicate_provider_add_on_retry(self):
+        adapter, memory, _, _ = self.adapter()
+        values = dict(user_id="u1", character_id="c1", conversation_id="s1",
+                      user_message_id="um1", assistant_message_id="am1",
+                      user_message="hello", assistant_message="hi")
+        adapter.record_completed_turn(**values)
+        adapter.record_completed_turn(**values)
+        self.assertEqual(len(memory.add_calls), 2)
+        self.assertEqual(len(memory.stored), 2)
+
+    def test_partial_first_write_is_resumed_without_readding_it(self):
+        adapter, memory, _, _ = self.adapter()
+        memory.fail_second_add = True
+        values = dict(user_id="u1", character_id="c1", conversation_id="s1",
+                      user_message_id="um1", assistant_message_id="am1",
+                      user_message="hello", assistant_message="hi")
+        with self.assertRaises(memory_service.MemoryPartialIngestionError):
+            adapter.record_completed_turn(**values)
+        memory.fail_second_add = False
+        adapter.record_completed_turn(**values)
+        self.assertEqual(len(memory.stored), 2)
+        self.assertEqual([call["role"] for call in memory.add_calls], ["user", "assistant", "assistant"])
+
+    def test_character_delete_only_removes_target_scope_and_repeat_is_safe(self):
+        adapter, memory, _, _ = self.adapter()
+        adapter.record_completed_turn(user_id="u1", character_id="c1", conversation_id="s1",
+                                      user_message_id="um1", assistant_message_id="am1",
+                                      user_message="hello", assistant_message="hi")
+        adapter.record_completed_turn(user_id="u1", character_id="c2", conversation_id="s2",
+                                      user_message_id="um2", assistant_message_id="am2",
+                                      user_message="other", assistant_message="other reply")
+        adapter.delete_character(user_id="u1", character_id="c1")
+        adapter.delete_character(user_id="u1", character_id="c1")
+        self.assertEqual(len(memory.stored), 2)
+        self.assertTrue(all(item.metadata["agent_id"] == "character:c2" for item in memory.stored))
+
     def test_installed_sdk_serializes_completed_turn_provenance_without_network(self):
         client = MemMachineClient(base_url="http://127.0.0.1:8080", timeout=3, max_retries=0)
         project = Project(client=client, org_id="vechar-org", project_id="vechar-test")
@@ -456,6 +519,8 @@ class MemMachineAdapterTests(unittest.TestCase):
                 }
             elif url.endswith("/api/v2/memories"):
                 response.json.return_value = {"results": [{"uid": "new-episode"}]}
+            elif url.endswith("/api/v2/memories/list"):
+                response.json.return_value = {"status": 0, "content": {"episodic_memory": []}}
             else:
                 raise AssertionError(f"Unexpected SDK request: {url}")
             return response
@@ -480,6 +545,51 @@ class MemMachineAdapterTests(unittest.TestCase):
                 self.assertEqual(metadata["session_id"], "conversation:s1")
                 self.assertEqual(metadata["user_message_id"], "um1")
                 self.assertEqual(metadata["assistant_message_id"], "am1")
+        finally:
+            client.close()
+
+    def test_installed_sdk_serializes_scoped_list_and_episode_delete_without_network(self):
+        client = MemMachineClient(base_url="http://127.0.0.1:8080", timeout=3, max_retries=0)
+        project = Project(client=client, org_id="vechar-org", project_id="vechar-test")
+        client.get_project = Mock(return_value=project)
+        seen = []
+
+        def sdk_response(method, url, **kwargs):
+            response = Mock()
+            if url.endswith("/api/v2/health"):
+                response.json.return_value = {"status": "healthy", "version": "0.3.9"}
+            elif url.endswith("/api/v2/memory/episodic/config/get"):
+                response.json.return_value = {
+                    "enabled": True, "long_term_memory_enabled": True,
+                    "short_term_memory_enabled": False,
+                }
+            elif url.endswith("/api/v2/memories/list"):
+                seen.append(kwargs["json"])
+                episodes = [] if len(seen) > 1 else [{
+                    "uid": "target-episode", "content": "hello", "session_key": "s1",
+                    "created_at": "2026-01-01T00:00:00Z", "producer_id": "user:u1",
+                    "producer_role": "user", "metadata": {
+                        "user_id": "user:u1", "agent_id": "character:c1",
+                    },
+                }]
+                response.json.return_value = {"status": 0, "content": {"episodic_memory": episodes}}
+            elif url.endswith("/api/v2/memories/episodic/delete"):
+                response.json.return_value = {}
+            else:
+                raise AssertionError(f"Unexpected SDK request: {url}")
+            return response
+
+        client.request = Mock(side_effect=sdk_response)
+        try:
+            adapter = MemMachineAdapter(config(), client=client)
+            adapter.delete_character(user_id="u1", character_id="c1")
+            self.assertEqual(len(seen), 2)
+            self.assertIn("metadata.user_id='user:u1'", seen[0]["filter"])
+            self.assertIn("metadata.agent_id='character:c1'", seen[0]["filter"])
+            deletes = [call.kwargs["json"] for call in client.request.call_args_list
+                       if call.args[1].endswith("/api/v2/memories/episodic/delete")]
+            self.assertEqual(len(deletes), 1)
+            self.assertEqual(deletes[0]["episodic_id"], "target-episode")
         finally:
             client.close()
 
@@ -514,9 +624,9 @@ class MemMachineAdapterTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertEqual(len(memory.add_calls), 2)
 
-    def test_unsupported_scope_deletion_fails_closed_without_sdk_delete(self):
+    def test_scoped_deletion_uses_list_and_id_delete(self):
         adapter, memory, _, _ = self.adapter()
-        with self.gateway(adapter), self.assertLogs(memory_service.logger, level="WARNING"):
+        with self.gateway(adapter):
             character = memory_service.delete_character_memories(user_id="u1", character_id="c1")
             conversation = memory_service.delete_conversation_memories(
                 user_id="u1", character_id="c1", conversation_id="s1"
@@ -524,7 +634,7 @@ class MemMachineAdapterTests(unittest.TestCase):
             user = memory_service.delete_user_memories(user_id="u1")
         for result in (character, conversation, user):
             self.assertEqual((result.success, result.retryable, result.provider),
-                             (False, False, "memmachine"))
+                             (True, False, "memmachine"))
         self.assertEqual(memory.add_calls, [])
 
 

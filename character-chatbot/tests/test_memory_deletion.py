@@ -9,8 +9,8 @@ from sqlalchemy.pool import StaticPool
 from app import llm, main
 from app.auth import issue_token
 from app.database import Base, get_db
-from app.models import Character, Conversation, Message, MessageRole, User, World
-from app.services import memory_service
+from app.models import Character, Conversation, MemoryDeletion, Message, MessageRole, User, World
+from app.services import memory_service, memory_jobs
 
 
 class MemoryDeletionTests(unittest.TestCase):
@@ -69,7 +69,7 @@ class MemoryDeletionTests(unittest.TestCase):
     def _delete_character(self, user_id=None):
         return self.client.delete(f"/characters/{self.character_id}", headers=self._headers(user_id))
 
-    def test_character_deletion_calls_scope_hook_before_db_cascade(self):
+    def test_character_deletion_persists_tombstone_before_async_cleanup(self):
         observed = []
 
         def inspect_delete(**kwargs):
@@ -77,12 +77,20 @@ class MemoryDeletionTests(unittest.TestCase):
                 observed.append((kwargs, db.get(Character, self.character_id) is not None,
                                  db.query(Conversation).filter(Conversation.character_id == self.character_id).count()))
 
-        with patch.object(memory_service, "_provider_delete_character", side_effect=inspect_delete) as hook:
+        with patch.object(memory_service, "PROVIDER_NAME", "mock"), \
+             patch.object(memory_jobs, "SessionLocal", lambda: Session(self.engine)), \
+             patch.object(memory_service, "_provider_delete_character", side_effect=inspect_delete) as hook:
             response = self._delete_character()
+            with Session(self.engine) as db:
+                deletion = db.query(MemoryDeletion).one()
+                self.assertEqual((deletion.status, deletion.user_id, deletion.character_id),
+                                 ("queued", self.alice_id, self.character_id))
+            hook.assert_not_called()
+            self.assertEqual(memory_jobs.process_deletion(deletion.id), "done")
 
         self.assertEqual(response.status_code, 204)
         hook.assert_called_once_with(user_id=self.alice_id, character_id=self.character_id)
-        self.assertEqual(observed[0][1:], (True, 2))
+        self.assertEqual(observed[0][1:], (False, 0))
         with Session(self.engine) as db:
             self.assertIsNone(db.get(Character, self.character_id))
             self.assertEqual(db.query(Conversation).filter(Conversation.character_id == self.character_id).count(), 0)
@@ -99,43 +107,55 @@ class MemoryDeletionTests(unittest.TestCase):
         with Session(self.engine) as db:
             self.assertIsNotNone(db.get(Character, self.character_id))
 
-    def test_retryable_partial_provider_failure_keeps_db_scope_for_retry(self):
+    def test_retryable_partial_provider_failure_keeps_tombstone_for_retry(self):
         error = memory_service.MemoryDeletionError("mock partial delete", retryable=True, partial=True)
-        with patch.object(memory_service, "PROVIDER_NAME", "mock"):
-            with patch.object(memory_service, "_provider_delete_character", side_effect=error):
-                with self.assertLogs(memory_service.logger, level="WARNING"):
-                    response = self._delete_character()
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["detail"], {"code": "memory_deletion_failed", "retryable": True})
+        with patch.object(memory_service, "PROVIDER_NAME", "mock"), \
+             patch.object(memory_jobs, "SessionLocal", lambda: Session(self.engine)), \
+             patch.object(memory_service, "_provider_delete_character", side_effect=error):
+            response = self._delete_character()
+            with Session(self.engine) as db:
+                deletion = db.query(MemoryDeletion).one()
+            self.assertEqual(memory_jobs.process_deletion(deletion.id), "retry")
+        self.assertEqual(response.status_code, 204)
         with Session(self.engine) as db:
-            self.assertIsNotNone(db.get(Character, self.character_id))
-            self.assertEqual(db.query(Conversation).filter(Conversation.character_id == self.character_id).count(), 2)
+            self.assertIsNone(db.get(Character, self.character_id))
+            self.assertEqual(db.get(MemoryDeletion, deletion.id).status, "queued")
 
-    def test_nonretryable_failure_keeps_db_scope_and_reports_failure(self):
+    def test_nonretryable_failure_retains_failed_tombstone(self):
         error = memory_service.MemoryDeletionError("mock permanent failure", retryable=False)
-        with patch.object(memory_service, "PROVIDER_NAME", "mock"):
-            with patch.object(memory_service, "_provider_delete_character", side_effect=error):
-                with self.assertLogs(memory_service.logger, level="WARNING"):
-                    response = self._delete_character()
-        self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["detail"], {"code": "memory_deletion_failed", "retryable": False})
+        with patch.object(memory_service, "PROVIDER_NAME", "mock"), \
+             patch.object(memory_jobs, "SessionLocal", lambda: Session(self.engine)), \
+             patch.object(memory_service, "_provider_delete_character", side_effect=error):
+            response = self._delete_character()
+            with Session(self.engine) as db:
+                deletion = db.query(MemoryDeletion).one()
+            self.assertEqual(memory_jobs.process_deletion(deletion.id), "done")
+        self.assertEqual(response.status_code, 204)
         with Session(self.engine) as db:
-            self.assertIsNotNone(db.get(Character, self.character_id))
+            self.assertIsNone(db.get(Character, self.character_id))
+            self.assertEqual(db.get(MemoryDeletion, deletion.id).status, "failed")
 
-    def test_ambiguous_provider_result_fails_closed_before_db_delete(self):
-        with patch.object(memory_service, "PROVIDER_NAME", "mock"):
-            with patch.object(memory_service, "_provider_delete_character", return_value=False):
-                with self.assertLogs(memory_service.logger, level="WARNING"):
-                    response = self._delete_character()
-        self.assertEqual(response.status_code, 503)
+    def test_ambiguous_provider_result_retains_retryable_tombstone(self):
+        with patch.object(memory_service, "PROVIDER_NAME", "mock"), \
+             patch.object(memory_jobs, "SessionLocal", lambda: Session(self.engine)), \
+             patch.object(memory_service, "_provider_delete_character", return_value=False):
+            response = self._delete_character()
+            with Session(self.engine) as db:
+                deletion = db.query(MemoryDeletion).one()
+            self.assertEqual(memory_jobs.process_deletion(deletion.id), "retry")
+        self.assertEqual(response.status_code, 204)
         with Session(self.engine) as db:
-            self.assertIsNotNone(db.get(Character, self.character_id))
+            self.assertIsNone(db.get(Character, self.character_id))
 
     def test_already_absent_provider_memory_counts_as_success(self):
-        with patch.object(memory_service, "PROVIDER_NAME", "mock"):
+        with patch.object(memory_service, "PROVIDER_NAME", "mock"), \
+             patch.object(memory_jobs, "SessionLocal", lambda: Session(self.engine)):
             with patch.object(memory_service, "_provider_delete_character",
                               side_effect=memory_service.MemoryDeletionNotFound()):
                 response = self._delete_character()
+                with Session(self.engine) as db:
+                    deletion = db.query(MemoryDeletion).one()
+                self.assertEqual(memory_jobs.process_deletion(deletion.id), "done")
         self.assertEqual(response.status_code, 204)
         with Session(self.engine) as db:
             self.assertIsNone(db.get(Character, self.character_id))

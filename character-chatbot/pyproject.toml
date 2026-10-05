@@ -33,3 +33,11 @@ topics = ["training-chunk"]
 [[tool.vercel.subscribers]]
 entrypoint = "training_subscribers:handle_finalize"
 topics = ["training-finalize"]
+
+[[tool.vercel.subscribers]]
+entrypoint = "memory_subscribers:handle_ingest"
+topics = ["memory-ingest"]
+
+[[tool.vercel.subscribers]]
+entrypoint = "memory_subscribers:handle_delete"
+topics = ["memory-delete"]

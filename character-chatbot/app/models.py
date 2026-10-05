@@ -350,3 +350,54 @@ class TrainingJobChunk(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     job = relationship("TrainingJob", back_populates="chunks")
+
+
+class MemoryIngestion(Base):
+    __tablename__ = "memory_ingestions"
+    __table_args__ = (
+        UniqueConstraint("provider", "assistant_message_id", name="uq_memory_ingestion_turn"),
+        CheckConstraint("status IN ('queued', 'processing', 'completed', 'failed', 'cancelled')", name="ck_memory_ingestion_status"),
+        Index("ix_memory_ingestions_status_lease", "status", "lease_expires_at"),
+        Index("ix_memory_ingestions_character", "user_id", "character_id"),
+    )
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    # Scope and source identifiers deliberately survive character/message cascade deletion.
+    user_id = Column(String, nullable=False)
+    character_id = Column(String, nullable=False)
+    conversation_id = Column(String, nullable=False)
+    user_message_id = Column(String, nullable=False)
+    assistant_message_id = Column(String, nullable=False)
+    provider = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued")
+    attempt_count = Column(Integer, nullable=False, default=0)
+    lease_token = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    last_error_code = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class MemoryDeletion(Base):
+    __tablename__ = "memory_deletions"
+    __table_args__ = (
+        UniqueConstraint("provider", "character_id", name="uq_memory_deletion_character"),
+        CheckConstraint("status IN ('queued', 'processing', 'completed', 'failed')", name="ck_memory_deletion_status"),
+        Index("ix_memory_deletions_status_lease", "status", "lease_expires_at"),
+    )
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    user_id = Column(String, nullable=False)
+    character_id = Column(String, nullable=False)
+    provider = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued")
+    attempt_count = Column(Integer, nullable=False, default=0)
+    lease_token = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    last_error_code = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)

@@ -24,6 +24,8 @@ class MemoryConfig:
     api_key: str | None = None
     timeout_seconds: int = 3
     candidate_limit: int = 10
+    max_ingestion_attempts: int = 5
+    max_deletion_attempts: int = 10
 
 
 def _positive_int(env: Mapping[str, str], name: str, default: int, maximum: int) -> int:
@@ -69,4 +71,6 @@ def load_memory_config(env: Mapping[str, str] | None = None) -> MemoryConfig:
         api_key=(env.get("MEMMACHINE_API_KEY") or "").strip() or None,
         timeout_seconds=_positive_int(env, "MEMMACHINE_TIMEOUT_SECONDS", 3, 30),
         candidate_limit=_positive_int(env, "MEMMACHINE_CANDIDATE_LIMIT", 10, 50),
+        max_ingestion_attempts=_positive_int(env, "MAX_MEMORY_INGESTION_ATTEMPTS", 5, 50),
+        max_deletion_attempts=_positive_int(env, "MAX_MEMORY_DELETION_ATTEMPTS", 10, 100),
     )

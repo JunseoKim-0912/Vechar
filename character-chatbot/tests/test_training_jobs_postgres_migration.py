@@ -17,10 +17,10 @@ from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from app.models import Character, TrainingJob, TrainingJobChunk, User
+from app.models import Character, Conversation, MemoryIngestion, Message, MessageRole, TrainingJob, TrainingJobChunk, User
 from app.database import Base
 from app.schemas import CharacterProfileData
-from app.services import training_jobs
+from app.services import memory_jobs, memory_service, training_jobs
 from app.services.training_queue import InMemoryTrainingQueue
 
 
@@ -43,9 +43,10 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
                     db.add(user)
                     db.commit()
                     user_id = user.id
-                command.upgrade(config, "0002_training_jobs")
-                self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0002_training_jobs")
-                self.assertTrue({"training_jobs", "training_job_chunks"} <= set(inspect(connection).get_table_names()))
+                command.upgrade(config, "head")
+                self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0003_memory_ingestion")
+                self.assertTrue({"training_jobs", "training_job_chunks", "memory_ingestions",
+                                 "memory_deletions"} <= set(inspect(connection).get_table_names()))
                 self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
                 self.assertEqual(connection.exec_driver_sql("SELECT count(*) FROM users WHERE id = %s", (user_id,)).scalar_one(), 1)
                 # Two independent PostgreSQL connections race for one chunk.
@@ -64,7 +65,7 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
                                              token_start=0, token_end=5, token_count=5, overlap_tokens=0)
                     db.add(chunk)
                     db.commit()
-                    job_id, chunk_id = job.id, chunk.id
+                    job_id, chunk_id, target_id = job.id, chunk.id, target.id
                 entered, release = Event(), Event()
                 calls = []
 
@@ -85,9 +86,45 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
                         release.set()
                         self.assertEqual(first.result(timeout=10), "done")
                 self.assertEqual(len(calls), 1)
+                with Session(engine) as db:
+                    conversation = Conversation(user_id=user_id, character_id=target_id)
+                    db.add(conversation)
+                    db.flush()
+                    user_turn = Message(conversation_id=conversation.id, role=MessageRole.USER, content="hello")
+                    assistant_turn = Message(conversation_id=conversation.id, role=MessageRole.CHARACTER, content="hi")
+                    db.add_all([user_turn, assistant_turn])
+                    db.flush()
+                    ingestion = MemoryIngestion(
+                        user_id=user_id, character_id=target_id, conversation_id=conversation.id,
+                        user_message_id=user_turn.id, assistant_message_id=assistant_turn.id,
+                        provider="memmachine",
+                    )
+                    db.add(ingestion)
+                    db.commit()
+                    ingestion_id = ingestion.id
+                memory_entered, memory_release = Event(), Event()
+                memory_calls = []
+
+                def record_memory(**kwargs):
+                    memory_calls.append(kwargs)
+                    memory_entered.set()
+                    self.assertTrue(memory_release.wait(10))
+
+                with patch.object(memory_jobs, "SessionLocal", lambda: Session(engine)), \
+                     patch.object(memory_service, "PROVIDER_NAME", "memmachine"), \
+                     patch.object(memory_service, "_provider_record_completed_turn", side_effect=record_memory):
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        first_memory = pool.submit(memory_jobs.process_ingestion, ingestion_id)
+                        self.assertTrue(memory_entered.wait(10))
+                        second_memory = pool.submit(memory_jobs.process_ingestion, ingestion_id)
+                        self.assertEqual(second_memory.result(timeout=10), "busy")
+                        memory_release.set()
+                        self.assertEqual(first_memory.result(timeout=10), "done")
+                self.assertEqual(len(memory_calls), 1)
                 command.downgrade(config, "0001_initial_schema")
                 self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0001_initial_schema")
-                self.assertFalse({"training_jobs", "training_job_chunks"} & set(inspect(connection).get_table_names()))
+                self.assertFalse({"training_jobs", "training_job_chunks", "memory_ingestions",
+                                  "memory_deletions"} & set(inspect(connection).get_table_names()))
                 self.assertEqual(connection.exec_driver_sql("SELECT count(*) FROM users WHERE id = %s", (user_id,)).scalar_one(), 1)
         finally:
             engine.dispose()

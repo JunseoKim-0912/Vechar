@@ -19,7 +19,8 @@ from ..services.training_jobs import cancel_target_jobs, submit_job
 from ..services.training_queue import get_training_queue
 from ..training_source import parse_training_request
 from ..services.world_profile_service import get_or_create_default_world
-from ..services import memory_service
+from ..services import memory_jobs
+from ..services.training_queue import MEMORY_DELETE_TOPIC
 from ..ownership import get_owned_world
 from ..tier_limits import get_limits, check_and_log_export, check_import_quota, log_import
 
@@ -130,18 +131,13 @@ def delete_character(character_id: str, user_id: str = Depends(get_current_user_
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
 
-    # Until a durable deletion intent/outbox exists, never delete the DB scope
-    # first: a provider failure would otherwise strand external memory.
-    memory_deletion = memory_service.delete_character_memories(user_id=user_id, character_id=character_id)
-    if not memory_deletion.success:
-        raise HTTPException(
-            status_code=503 if memory_deletion.retryable else 502,
-            detail={"code": "memory_deletion_failed", "retryable": memory_deletion.retryable},
-        )
-
     cancel_target_jobs(db, user_id=user_id, target_type="character", target_id=character_id)
+    deletion = memory_jobs.schedule_character_deletion(
+        db, user_id=user_id, character_id=character_id,
+    )
     db.delete(character)  # cascades to profile, training_sources, conversations, correction_logs (see models.py)
     db.commit()
+    memory_jobs.publish_safe(MEMORY_DELETE_TOPIC, deletion.id if deletion else None)
     return None
 
 

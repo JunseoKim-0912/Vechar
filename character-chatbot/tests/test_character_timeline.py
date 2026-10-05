@@ -16,7 +16,7 @@ from app.services.character_profile_service import (
     apply_user_correction, get_profile, merge_training_source, set_initial_profile,
 )
 from app.services.character_timeline import derive_chat_reference, reconcile_timeline
-from app.services.chat_prompt_builder import build_chat_instructions
+from app.services.chat_prompt_builder import build_chat_input, build_chat_instructions
 
 
 def event(key, age=None, summary="", **kwargs):
@@ -188,6 +188,26 @@ class TimelineReconciliationTests(unittest.TestCase):
         prompt = build_chat_instructions("Ari", profile, None, correction_prefix="/수정")
         self.assertIn("A prophecy says the kingdom may fall", prompt)
         self.assertNotIn("actually collapsed", prompt)
+
+    def test_earlier_memory_is_reference_not_current_state_or_future_canon(self):
+        timeline = reconcile_timeline([], [
+            event("met", 18, "Met Alice", state_changes=TimelineStateChanges(
+                occupation="student", relationships=[RelationshipState(name="Alice", status="friend")])),
+            event("today", 21, "Works as a guard", state_changes=TimelineStateChanges(occupation="guard")),
+            event("death", 24, "Dies", is_death=True),
+            event("future", 25, "Future secret learned"),
+        ])
+        profile = CharacterProfileData(timeline=timeline, chat_reference_point=derive_chat_reference(timeline))
+        instructions = build_chat_instructions("Ari", profile, None, correction_prefix="/수정")
+        inputs = build_chat_input([], "Do you remember Alice?", memories=[
+            "At 18 I first met Alice; I was a student.",
+            "At 25 I learned the future secret.",
+        ])
+        self.assertIn("Current occupation: guard", instructions)
+        self.assertIn("Treat past states as memories", instructions)
+        self.assertNotIn("Future secret learned", instructions)
+        self.assertIn("Canon and timeline win", inputs[0]["content"])
+        self.assertEqual(inputs[0]["role"], "user")
 
 
 class TimelineProfileServiceTests(unittest.TestCase):

@@ -65,6 +65,7 @@ class PostgreSQLMetadataTests(unittest.TestCase):
             "world_sources", "conversations", "messages", "correction_logs",
             "export_logs", "import_logs", "llm_usage", "training_jobs", "training_job_chunks",
         }
+        expected_tables.update({"memory_ingestions", "memory_deletions"})
         self.assertEqual(set(Base.metadata.tables), expected_tables)
         compiled = "\n".join(statements)
         self.assertIn("CREATE TABLE users", compiled)

@@ -21,7 +21,7 @@ from app.main import app
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 INI_PATH = BACKEND_ROOT / "alembic.ini"
 INITIAL_REVISION = "0001_initial_schema"
-HEAD_REVISION = "0002_training_jobs"
+HEAD_REVISION = "0003_memory_ingestion"
 
 
 class AlembicFoundationTests(unittest.TestCase):
@@ -33,7 +33,8 @@ class AlembicFoundationTests(unittest.TestCase):
         script = ScriptDirectory.from_config(config)
         self.assertEqual(script.get_heads(), [HEAD_REVISION])
         self.assertIsNone(script.get_revision(INITIAL_REVISION).down_revision)
-        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, INITIAL_REVISION)
+        self.assertEqual(script.get_revision("0002_training_jobs").down_revision, INITIAL_REVISION)
+        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0002_training_jobs")
         self.assertIsNone(config.get_main_option("sqlalchemy.url"))
         ini_text = INI_PATH.read_text(encoding="utf-8")
         self.assertNotIn("postgresql://", ini_text)
@@ -104,7 +105,9 @@ class AlembicFoundationTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 command.downgrade(self.make_config(), "0001_initial_schema:base", sql=True)
         ddl = output.getvalue()
-        baseline_tables = set(Base.metadata.tables) - {"training_jobs", "training_job_chunks"}
+        baseline_tables = set(Base.metadata.tables) - {
+            "training_jobs", "training_job_chunks", "memory_ingestions", "memory_deletions",
+        }
         last_table_drop = max(ddl.index(f"DROP TABLE {table}") for table in baseline_tables)
         for name in ("changereason", "sourcetype", "worldsourcetype", "ingeststatus", "messagerole"):
             self.assertEqual(ddl.count(f"DROP TYPE {name}"), 1)

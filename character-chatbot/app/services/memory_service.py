@@ -15,6 +15,7 @@ from time import perf_counter
 from typing import Literal
 
 from ..memory_config import load_memory_config
+from ..memory_config import MemoryConfigurationError
 
 logger = logging.getLogger(__name__)
 MEMORY_CONFIG = load_memory_config()
@@ -160,7 +161,7 @@ def retrieve_for_turn(*, user_id: str, character_id: str, conversation_id: str,
             ),
             user_id, character_id,
         )
-    except (MemoryProviderError, TimeoutError, ConnectionError) as exc:
+    except (MemoryProviderError, MemoryConfigurationError, TimeoutError, ConnectionError) as exc:
         timed_out = isinstance(exc, TimeoutError)
         logger.warning("Memory retrieval failed: provider=%s error_type=%s timeout=%s",
                        PROVIDER_NAME, type(exc).__name__, timed_out)
@@ -233,9 +234,8 @@ def _delete_memories(scope_type: DeletionScope, scope_id: str,
                      operation: Callable[[], None]) -> MemoryDeletionResult:
     """Not-found is success; known provider failures are explicit and retryable.
 
-    No DB resource is deleted here. A caller must authorize the resource and
-    inspect ``success`` before deleting it. This interim pre-delete contract
-    is not a substitute for a durable production deletion intent/outbox.
+    No DB resource is deleted here. Character deletion commits a durable
+    tombstone first; its worker uses this result to reconcile external state.
     """
     started = perf_counter()
     attempted = PROVIDER_NAME != "noop"

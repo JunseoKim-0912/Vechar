@@ -72,5 +72,5 @@ def post_message(
         return send_message(db, conversation.character_id, conversation.id, payload.content, user_id, payload.locale)
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"메시지 처리 중 오류가 발생했습니다: {e}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="메시지 처리 중 오류가 발생했습니다.") from exc

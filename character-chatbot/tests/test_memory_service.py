@@ -8,9 +8,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import Character, Conversation, Message, MessageRole, User, World
+from app.models import Character, Conversation, MemoryIngestion, Message, MessageRole, User, World
 from app.schemas import CharacterProfileData
-from app.services import chat_service, memory_service
+from app.services import chat_service, memory_service, memory_jobs
 from app.services.chat_context_budget import select_chat_context
 from app.services.chat_prompt_builder import build_chat_input, build_chat_instructions
 
@@ -142,8 +142,15 @@ class MemoryServiceTests(unittest.TestCase):
                 assistant_row = check_db.get(Message, kwargs["assistant_message_id"])
                 observed.append((user_row.role, user_row.content, assistant_row.role, assistant_row.content, kwargs))
 
-        with patch.object(memory_service, "_provider_record_completed_turn", side_effect=inspect_completed_turn):
+        with patch.object(memory_service, "PROVIDER_NAME", "memmachine"), \
+             patch.object(memory_jobs, "SessionLocal", lambda: Session(self.engine)), \
+             patch.object(memory_service, "_provider_retrieve", return_value=()), \
+             patch.object(memory_service, "_provider_record_completed_turn", side_effect=inspect_completed_turn):
             self._send("질문", "완료된 답변")
+            self.assertEqual(observed, [])  # Chat never waits for provider writes.
+            row = self.db.query(MemoryIngestion).one()
+            self.assertEqual(row.status, "queued")
+            self.assertEqual(memory_jobs.process_ingestion(row.id), "done")
 
         self.assertEqual(len(observed), 1)
         user_role, user_content, assistant_role, assistant_content, kwargs = observed[0]
@@ -154,7 +161,9 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertNotEqual(kwargs["user_message_id"], kwargs["assistant_message_id"])
 
     def test_generation_failure_does_not_record_memory(self):
-        with patch.object(memory_service, "_provider_record_completed_turn") as record:
+        with patch.object(memory_service, "PROVIDER_NAME", "memmachine"), \
+             patch.object(memory_service, "_provider_retrieve", return_value=()), \
+             patch.object(memory_service, "_provider_record_completed_turn") as record:
             with patch.object(chat_service, "generate_text", side_effect=RuntimeError("mock generation failure")):
                 with self.assertRaisesRegex(RuntimeError, "mock generation failure"):
                     chat_service.send_message(
@@ -162,6 +171,7 @@ class MemoryServiceTests(unittest.TestCase):
                     )
         record.assert_not_called()
         self.assertEqual([row.role for row in self.db.query(Message).all()], [MessageRole.USER])
+        self.assertEqual(self.db.query(MemoryIngestion).count(), 0)
 
     def test_assistant_db_commit_failure_does_not_record_memory(self):
         real_commit = self.db.commit
@@ -174,14 +184,19 @@ class MemoryServiceTests(unittest.TestCase):
                 raise RuntimeError("mock DB write failure")
             return real_commit()
 
-        with patch.object(memory_service, "_provider_record_completed_turn") as record:
+        with patch.object(memory_service, "PROVIDER_NAME", "memmachine"), \
+             patch.object(memory_service, "_provider_retrieve", return_value=()), \
+             patch.object(memory_service, "_provider_record_completed_turn") as record:
             with patch.object(self.db, "commit", side_effect=fail_assistant_commit):
                 with self.assertRaisesRegex(RuntimeError, "mock DB write failure"):
                     self._send()
         record.assert_not_called()
+        self.db.rollback()
+        self.assertEqual(self.db.query(MemoryIngestion).count(), 0)
 
     def test_correction_command_never_retrieves_or_records_episodic_memory(self):
-        with patch.object(memory_service, "retrieve_for_turn") as retrieve:
+        with patch.object(memory_service, "PROVIDER_NAME", "memmachine"), \
+             patch.object(memory_service, "retrieve_for_turn") as retrieve:
             with patch.object(memory_service, "record_completed_turn") as record:
                 with patch.object(chat_service, "apply_user_correction",
                                   return_value=SimpleNamespace(version=2)):
@@ -192,6 +207,7 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual(result["role"], "SYSTEM_NOTE")
         retrieve.assert_not_called()
         record.assert_not_called()
+        self.assertEqual(self.db.query(MemoryIngestion).count(), 0)
 
     def test_timeout_provider_error_and_malformed_result_fallback_with_metadata(self):
         cases = [
@@ -220,9 +236,15 @@ class MemoryServiceTests(unittest.TestCase):
                                      for item in generation.call_args.kwargs["input_messages"]))
 
     def test_recording_provider_failure_does_not_fail_saved_chat(self):
-        with patch.object(memory_service, "_provider_record_completed_turn", side_effect=TimeoutError("mock")):
-            with self.assertLogs(memory_service.logger, level="WARNING"):
-                response, _ = self._send()
+        with patch.object(memory_service, "PROVIDER_NAME", "memmachine"), \
+             patch.object(memory_jobs, "SessionLocal", lambda: Session(self.engine)), \
+             patch.object(memory_service, "_provider_retrieve", return_value=()), \
+             patch.object(memory_service, "_provider_record_completed_turn", side_effect=TimeoutError("mock")):
+            response, _ = self._send()
+            row = self.db.query(MemoryIngestion).one()
+            self.assertEqual(memory_jobs.process_ingestion(row.id), "retry")
+            self.db.expire_all()
+            self.assertEqual(self.db.get(MemoryIngestion, row.id).status, "queued")
         self.assertEqual(response, {"role": "CHARACTER", "content": "답변"})
         self.assertEqual(self.db.query(Message).filter(Message.role == MessageRole.CHARACTER).count(), 1)
 

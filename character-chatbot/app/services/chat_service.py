@@ -8,7 +8,8 @@ from ..schemas import CharacterProfileData, WorldProfileData
 from .character_profile_service import get_profile, apply_user_correction
 from .chat_prompt_builder import build_chat_instructions
 from .chat_context_budget import select_chat_context
-from . import memory_service
+from . import memory_service, memory_jobs
+from .training_queue import MEMORY_INGEST_TOPIC
 from .world_profile_service import get_world_profile
 from ..tier_limits import get_limits
 from ..ownership import get_owned_world
@@ -122,12 +123,12 @@ def send_message(
 
     assistant_turn = Message(conversation_id=conversation_id, role=MessageRole.CHARACTER, content=reply_text)
     db.add(assistant_turn)
-    db.commit()
-
-    memory_service.record_completed_turn(
-        user_id=user_id, character_id=character_id, conversation_id=conversation_id,
+    db.flush()
+    ingestion = memory_jobs.schedule_ingestion(
+        db, user_id=user_id, character_id=character_id, conversation_id=conversation_id,
         user_message_id=user_message_id, assistant_message_id=assistant_turn.id,
-        user_message=user_message, assistant_message=reply_text,
     )
+    db.commit()
+    memory_jobs.publish_safe(MEMORY_INGEST_TOPIC, ingestion.id if ingestion else None)
 
     return {"role": "CHARACTER", "content": reply_text}

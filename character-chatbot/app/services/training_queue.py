@@ -2,12 +2,29 @@
 
 import os
 from typing import Protocol
+from uuid import uuid4
 
 
 PLAN_TOPIC = "training-plan"
 CHUNK_TOPIC = "training-chunk"
 FINALIZE_TOPIC = "training-finalize"
 MESSAGE_VERSION = 1
+MEMORY_INGEST_TOPIC = "memory-ingest"
+MEMORY_DELETE_TOPIC = "memory-delete"
+
+
+def publish_memory_operation(topic: str, operation_id: str) -> None:
+    """Use the same Queue infrastructure; only IDs cross the transport."""
+    if topic not in {MEMORY_INGEST_TOPIC, MEMORY_DELETE_TOPIC}:
+        raise ValueError("Unsupported memory queue topic")
+    payload = {"v": MESSAGE_VERSION, "operation_id": operation_id}
+    if os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV"):
+        from vercel.queue.sync import send
+        # Reconciliation must not be suppressed by a previously accepted send.
+        # The DB claim, not transport deduplication, provides idempotency.
+        send(topic, payload, idempotency_key=f"{topic}-{operation_id}-{uuid4()}")
+    else:
+        _local_queue.messages.append((topic, payload))
 
 
 class TrainingQueue(Protocol):

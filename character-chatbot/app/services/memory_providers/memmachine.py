@@ -1,10 +1,9 @@
 """MemMachine 0.3.9 adapter behind Vechar's provider-neutral memory contract.
 
-This is a mock-tested integration seam, not permission to enable an external
-provider in production. Durable deletion intent, retrieval tombstones, and
-retryable cleanup are still required before real user data is stored.
+Project setup remains an explicit operation, never a side effect of chat.
 """
 
+import logging
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 
@@ -47,6 +46,8 @@ def _field(item: object, name: str) -> object:
 
 
 COMPATIBLE_VERSION = "0.3.9"
+# SDK 0.3.9 logs raw search queries at INFO; suppress them in production.
+logging.getLogger("memmachine_client.memory").setLevel(logging.WARNING)
 
 
 def validate_sdk_versions() -> None:
@@ -79,12 +80,15 @@ class MemMachineAdapter:
         # validate before the first chat retrieval or write, not after one.
         self._project_cache = self._load_and_validate_project()
 
-    def _call(self, operation, *, missing_is_configuration: bool = False):
+    def _call(self, operation, *, missing_is_configuration: bool = False,
+              not_found_is_absent: bool = False):
         try:
             return operation()
         except MemoryScopeError:
             raise
         except MemoryProviderError:
+            raise
+        except MemoryConfigurationError:
             raise
         except (TimeoutError, ConnectionError):
             raise
@@ -94,6 +98,8 @@ class MemMachineAdapter:
             raise ConnectionError("MemMachine connection failed") from exc
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else None
+            if not_found_is_absent and status == 404:
+                return True
             if missing_is_configuration and status == 404:
                 raise MemoryConfigurationError("MemMachine project or configuration API was not found") from exc
             if status in {401, 403}:
@@ -236,6 +242,15 @@ class MemMachineAdapter:
             ("assistant", assistant_message, assistant_message_id),
         ):
             try:
+                # SDK 0.3.9 does not accept caller-assigned episode IDs. Its
+                # scope-filtered list API narrows a retry's duplicate window.
+                existing = self._list_episodes(
+                    memory, filter_dict={"metadata.source_message_id": message_id}
+                )
+                if existing:
+                    if len(existing) != 1:
+                        raise MemoryInvalidResult("MemMachine has duplicate source episodes")
+                    continue
                 result = self._call(lambda role=role, text=text, message_id=message_id: memory.add(
                     content=text,
                     role=role,
@@ -251,20 +266,62 @@ class MemMachineAdapter:
                     raise MemoryPartialIngestionError("MemMachine completed turn was only partly stored") from exc
                 raise
 
+    def _list_episodes(self, memory, *, filter_dict: dict[str, str] | None = None,
+                       max_pages: int = 2) -> list:
+        episodes = []
+        for page in range(max_pages):
+            result = self._call(lambda page=page: memory.list(
+                memory_type=MemoryType.Episodic, page_size=100, page_num=page,
+                filter_dict=filter_dict, timeout=self.config.timeout_seconds,
+            ))
+            if _field(result, "status") != 0:
+                raise MemoryInvalidResult("MemMachine list returned an unsuccessful status")
+            batch = _field(_field(result, "content"), "episodic_memory")
+            if batch is None:
+                batch = []
+            if not isinstance(batch, (list, tuple)):
+                raise MemoryInvalidResult("MemMachine list returned malformed episodes")
+            for episode in batch:
+                metadata = _field(episode, "metadata")
+                if not isinstance(metadata, Mapping) or not isinstance(_field(episode, "uid"), str) or not _field(episode, "uid"):
+                    raise MemoryInvalidResult("MemMachine list returned an invalid episode")
+                for key, value in memory.get_context()["metadata"].items():
+                    if metadata.get(key) != value:
+                        raise MemoryScopeError("MemMachine list crossed its requested scope")
+                if filter_dict:
+                    for key, value in filter_dict.items():
+                        if metadata.get(key.removeprefix("metadata.")) != value:
+                            raise MemoryScopeError("MemMachine list filter was not respected")
+            episodes.extend(batch)
+            if len(batch) < 100:
+                return episodes
+        if max_pages == 1:
+            return episodes
+        raise MemoryProviderError("MemMachine scope exceeded bounded pagination")
+
+    def _delete_scope(self, memory) -> None:
+        # Not atomic at provider side. Always drain page zero, then verify empty;
+        # a retry may safely repeat a partial purge.
+        for _ in range(10):
+            episodes = self._list_episodes(memory, max_pages=1)
+            if not episodes:
+                return
+            ids = [_field(episode, "uid") for episode in episodes]
+            result = self._call(lambda: memory.delete_episodic(
+                episodic_id=ids[0], episodic_ids=ids[1:], timeout=self.config.timeout_seconds,
+            ), not_found_is_absent=True)
+            if result is not True:
+                raise MemoryDeletionError("Ambiguous MemMachine delete receipt", retryable=True)
+        raise MemoryDeletionError("MemMachine scope deletion exceeded batch limit", retryable=True)
+
     def delete_conversation(self, *, user_id: str, character_id: str, conversation_id: str) -> None:
-        raise MemoryDeletionError(
-            "MemMachine 0.3.9 has no atomic source-conversation deletion API",
-            retryable=False,
-        )
+        self._delete_scope(self._memory(user_id=user_id, character_id=character_id,
+                                        conversation_id=conversation_id))
 
     def delete_character(self, *, user_id: str, character_id: str) -> None:
-        raise MemoryDeletionError(
-            "MemMachine 0.3.9 has no atomic user/agent-scope deletion API",
-            retryable=False,
-        )
+        self._delete_scope(self._memory(user_id=user_id, character_id=character_id))
 
     def delete_user(self, *, user_id: str) -> None:
-        raise MemoryDeletionError(
-            "MemMachine 0.3.9 has no atomic user-scope deletion API",
-            retryable=False,
-        )
+        metadata = {"user_id": _external_id("user", user_id)}
+        memory = self._call(lambda: self._project().memory(metadata=metadata))
+        self._delete_scope(memory)
