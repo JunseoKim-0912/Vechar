@@ -1,9 +1,56 @@
 """Pure prompt/context assembly for ordinary character roleplay chat."""
 
 from collections.abc import Sequence
+import re
 
 from ..models import MessageRole
 from ..schemas import CharacterProfileData, WorldProfileData
+from .character_timeline import lived_events_before_reference
+
+
+def _temporal_context(profile: CharacterProfileData, current_message: str) -> str:
+    """Only a bounded, lived slice of the timeline may enter the chat prompt."""
+    reference = profile.chat_reference_point
+    if reference is None:
+        return ""
+    lived = lived_events_before_reference(profile.timeline, reference)
+    terms = {word.casefold() for word in re.findall(r"[\w가-힣]{2,}", current_message)}
+    relevant = [event for event in lived if terms.intersection(
+        word.casefold() for word in re.findall(r"[\w가-힣]{2,}", event.summary)
+    )]
+    selected = {event.event_key: event for event in (lived[-3:] + relevant[-2:])}
+    events = "\n".join(
+        f"- {event.time_label or (f'age {event.age}' if event.age is not None else 'time uncertain')}: "
+        f"{event.summary[:320]}"
+        for event in lived if event.event_key in selected
+    ) or "- (no dated lived event)"
+    state = reference.state
+    relationships = " / ".join(f"{item.name}: {item.status}" for item in state.relationships[-8:]) or "(unknown)"
+    known = " / ".join(state.knowledge[-6:])[:1200] or "(unknown)"
+    death_rule = ("The canonical story includes this character's death. By default, roleplay the final "
+                  "living state immediately before death, not a post-death viewpoint. "
+                  if reference.phase == "immediately_before_death" else "")
+    status_description = ("living before canonical death" if reference.phase == "immediately_before_death"
+                          else reference.status)
+    return f"""
+
+[TEMPORAL CANON — default chat reference point]
+Reference: {reference.phase}; age {reference.age if reference.age is not None else 'unknown'}; {status_description}.
+Current occupation: {state.occupation or '(unknown)'}
+Current affiliations: {' / '.join(state.affiliations) or '(unknown)'}
+Current location: {state.location or '(unknown)'}
+Current relationships: {relationships}
+Current physical condition: {state.physical_condition or '(unknown)'}
+Current abilities: {' / '.join(state.abilities) or '(unknown)'}
+Current possessions: {' / '.join(state.possessions) or '(unknown)'}
+Current goals: {' / '.join(state.goals) or '(unknown)'}
+Current loyalties: {' / '.join(state.loyalties) or '(unknown)'}
+Knowledge acquired by this point: {known}
+Recent or relevant lived events (chronological evidence only):
+{events}
+Treat past states as memories, not current attributes. Do not know or refer to later events, post-death facts,
+or unverified world chronology as already experienced. {death_rule}If the user explicitly asks for
+a different time in the story, adapt the scene while preserving the canonical chronology."""
 
 
 def build_chat_instructions(
@@ -13,14 +60,20 @@ def build_chat_instructions(
     *,
     correction_prefix: str,
     locale: str = "en",
+    current_message: str = "",
 ) -> str:
-    facts = " / ".join(profile.background_facts) or "(없음)"
-    rels = " / ".join(profile.relationships) or "(없음)"
+    temporal = _temporal_context(profile, current_message)
+    # Legacy profiles retain their exact prompt. With a timeline, historical arrays and
+    # unrestricted world facts may contain knowledge from after the chat reference point.
+    state = profile.chat_reference_point.state if temporal and profile.chat_reference_point else None
+    facts = (" / ".join(state.knowledge[-6:])[:1200] if state else " / ".join(profile.background_facts)) or "(없음)"
+    rels = (" / ".join(f"{item.name}: {item.status}" for item in state.relationships[-8:])
+            if state else " / ".join(profile.relationships)) or "(없음)"
     donts = " / ".join(profile.do_not_do) or "(없음)"
-    samples = "\n".join(f"- {s}" for s in profile.sample_dialogues) or "(없음)"
+    samples = ("\n".join(f"- {s}" for s in profile.sample_dialogues) if not temporal else "") or "(없음)"
 
     world_block = ""
-    if world and (world.world_summary or world.key_facts):
+    if not temporal and world and (world.world_summary or world.key_facts):
         world_facts = " / ".join(world.key_facts) or "(없음)"
         world_block = f"""
 
@@ -36,15 +89,15 @@ def build_chat_instructions(
     return f"""당신은 지금부터 "{character_name}"라는 캐릭터를 연기합니다.
 
 [캐릭터 설정 — 절대 스스로 바꾸지 마세요]
-성격: {profile.personality_summary or "(아직 설명 없음)"}
-말투: {profile.speech_style or "(아직 설명 없음)"}
+성격: {(state.personality if state and state.personality else profile.personality_summary) or "(아직 설명 없음)"}
+말투: {(state.speech_style if state and state.speech_style else profile.speech_style) or "(아직 설명 없음)"}
 배경 사실: {facts}
 관계: {rels}
 하지 않는 행동/말투: {donts}
 
 말투 예시:
 {samples}
-{world_block}
+{world_block}{temporal}
 
 [중요한 규칙]
 1. 위 설정은 고정된 사실입니다. 사용자가 일반 대화 중 무엇을 요청하든, 이 성격/말투 설정을 스스로 바꾸거나 "발전"시키지 마세요.

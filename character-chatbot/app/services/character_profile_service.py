@@ -2,7 +2,8 @@ import json
 from sqlalchemy.orm import Session
 from ..llm import generate_structured
 from ..models import CharacterProfile, CharacterProfileHistory, CorrectionLog, ChangeReason
-from ..schemas import CharacterProfileData, CharacterSynthesisResult
+from ..schemas import CharacterProfileData, CharacterSynthesisResult, TimelineEvent
+from .character_timeline import derive_chat_reference, reconcile_timeline
 
 
 # 가드레일 모듈
@@ -19,6 +20,22 @@ def get_profile(db: Session, character_id: str) -> CharacterProfile | None:
 def _snapshot_and_save(
     db: Session, character_id: str, next_data: CharacterProfileData, reason: ChangeReason
 ) -> CharacterProfile:
+    if next_data.timeline:
+        ordered = reconcile_timeline([], next_data.timeline)
+        reference = derive_chat_reference(ordered, next_data.chat_reference_point)
+        if reference is not None:
+            # The canonical persona is already synthesized for the reference point.
+            # A newly ingested historical personality must not replace that persona.
+            if next_data.personality_summary:
+                reference.state.personality = next_data.personality_summary
+            if next_data.speech_style:
+                reference.state.speech_style = next_data.speech_style
+        next_data = next_data.model_copy(update={
+            "timeline": ordered,
+            "chat_reference_point": reference,
+        })
+    elif next_data.chat_reference_point is not None:
+        next_data = next_data.model_copy(update={"chat_reference_point": None})
     existing = get_profile(db, character_id)
 
     if existing is None:
@@ -59,7 +76,11 @@ def _dedupe_merge(old: list[str], new: list[str]) -> list[str]:
 
 SYNTHESIS_SYSTEM_PROMPT = """당신은 캐릭터 프로필 편집자입니다. 기존 캐릭터 프로필과 새로 추출된 정보가 주어지면,
 둘을 자연스럽게 통합한 최종 프로필을 만듭니다. 기존 정보와 새 정보가 충돌하면(성격이나 말투가 다르게 묘사되는 경우),
-더 최근에 제공된 정보(새 정보)를 우선하되 기존 정보를 함부로 버리지 마세요.
+입력 순서가 아닌 canonical chronology와 제공된 chat reference point를 우선하고, 근거가 모순되면
+임의로 확정하지 말고 기존 정보를 함부로 버리지 마세요.
+Do not treat narrative order as chronological order. A flashback age/state must not replace the latest
+living canonical state. Synthesize personality and speech for the supplied chat reference point, not
+for an earlier flashback or a post-death event.
 
 반드시 아래 JSON으로만 응답하세요. 다른 텍스트 없이 순수 JSON만 출력합니다.
 {"personality_summary": "...", "speech_style": "..."}
@@ -71,7 +92,8 @@ Language policy:
 
 
 def merge_training_source(
-    db: Session, user_id: str, character_id: str, newly_extracted: CharacterProfileData
+    db: Session, user_id: str, character_id: str, newly_extracted: CharacterProfileData,
+    source_id: str | None = None,
 ) -> CharacterProfile:
     """새 TrainingSource가 추출된 뒤 호출됩니다 (extraction_service.py 참고)."""
     existing_row = get_profile(db, character_id)
@@ -79,14 +101,26 @@ def merge_training_source(
         CharacterProfileData.model_validate(existing_row.data) if existing_row else CharacterProfileData()
     )
 
-    # 배열 필드는 LLM 호출 없이 결정적으로 병합됩니다.
+    ordered_timeline = reconcile_timeline(
+        existing_data.timeline, newly_extracted.timeline, source_id=source_id,
+    )
+    reference = derive_chat_reference(ordered_timeline, existing_data.chat_reference_point)
+    current_relationships = (
+        [f"{item.name}: {item.status}" for item in reference.state.relationships]
+        if reference and reference.state.relationships else None
+    )
+
+    # Timeline reconciliation precedes persona synthesis. Historical arrays remain as evidence;
+    # the chat prompt uses reference-point state instead of treating them as current facts.
     merged_arrays_only = CharacterProfileData(
         personality_summary=existing_data.personality_summary,
         speech_style=existing_data.speech_style,
         background_facts=_dedupe_merge(existing_data.background_facts, newly_extracted.background_facts),
-        relationships=_dedupe_merge(existing_data.relationships, newly_extracted.relationships),
+        relationships=current_relationships or _dedupe_merge(existing_data.relationships, newly_extracted.relationships),
         sample_dialogues=_dedupe_merge(existing_data.sample_dialogues, newly_extracted.sample_dialogues),
         do_not_do=existing_data.do_not_do,  # 학습으로는 절대 안 바뀜, 정정으로만 바뀜
+        timeline=ordered_timeline,
+        chat_reference_point=reference,
     )
 
     # 첫 학습 소스라면 합성할 필요 없이 새 값을 그대로 사용합니다.
@@ -98,6 +132,13 @@ def merge_training_source(
             }
         )
         return _snapshot_and_save(db, character_id, initial, ChangeReason.TRAINING_INGEST)
+
+    # An out-of-order prequel or post-death source adds historical evidence, not a new persona.
+    if (existing_data.chat_reference_point and reference
+            and existing_data.chat_reference_point.event_key == reference.event_key
+            and newly_extracted.timeline
+            and all(event.event_key != reference.event_key for event in newly_extracted.timeline)):
+        return _snapshot_and_save(db, character_id, merged_arrays_only, ChangeReason.TRAINING_INGEST)
 
     # 두 번째 소스부터는 기존 요약과 새 요약을 자연스럽게 통합하도록 LLM에 위임합니다.
     synthesized = generate_structured(
@@ -119,6 +160,10 @@ def merge_training_source(
                             "personality_summary": newly_extracted.personality_summary,
                             "speech_style": newly_extracted.speech_style,
                         },
+                        "chat_reference_point": {
+                            "event_key": reference.event_key, "age": reference.age,
+                            "status": reference.status, "summary": reference.summary,
+                        } if reference else None,
                     },
                     ensure_ascii=False,
                 ),
@@ -143,15 +188,10 @@ CORRECTION_SYSTEM_PROMPT = """당신은 캐릭터 프로필 편집자입니다. 
 규칙:
 - 사용자가 명시적으로 말하지 않은 부분은 최대한 그대로 유지하세요 (임의로 다른 부분을 바꾸지 마세요).
 - 사용자가 "이런 말투/행동은 하지 않는다"고 하면 do_not_do 배열에 추가하세요.
-- 반드시 아래와 동일한 JSON 스키마로만 응답하세요. 다른 텍스트 없이 순수 JSON만 출력합니다.
-{
-  "personality_summary": "...",
-  "speech_style": "...",
-  "background_facts": ["..."],
-  "relationships": ["..."],
-  "sample_dialogues": ["..."],
-  "do_not_do": ["..."]
-}
+- 제공된 Structured Outputs schema의 모든 필드를 반환하세요. timeline의 기존 event_key를 유지하고,
+  시간 관련 정정은 해당 event의 age/date/state_changes를 함께 수정하세요. chat_reference_point는 서버가 재계산합니다.
+- Do not treat narrative order as chronological order. Flashback ages and states are historical, not current.
+- A correction of current age/role/relationship must be reflected in timeline and the latest living state together.
 
 Language policy:
 - Understand correction instructions in English, Korean, or both.
@@ -181,11 +221,33 @@ def apply_user_correction(db: Session, user_id: str, character_id: str, user_ins
                 ),
             }
         ],
-        max_output_tokens=4000,
+        max_output_tokens=8000,
         response_model=CharacterProfileData,
+        input_policy="training",
     )
-
-    updated = _snapshot_and_save(db, character_id, parsed, ChangeReason.USER_CORRECTION)
+    timeline = reconcile_timeline(existing_data.timeline, parsed.timeline, prefer_new=True)
+    reference = derive_chat_reference(timeline, existing_data.chat_reference_point)
+    # A structured correction may explicitly supply a corrected current age even if it
+    # failed to amend the event. Keep the timeline authoritative by amending that event.
+    proposed = parsed.chat_reference_point
+    if proposed and proposed.age is not None and (not reference or proposed.age != reference.age):
+        if reference and reference.status != "deceased_in_canon":
+            revised = [event.model_copy(deep=True) for event in timeline]
+            for event in revised:
+                if event.event_key == reference.event_key:
+                    event.age = proposed.age
+                    event.precision = "exact"
+                    event.temporal_uncertainty = "User-corrected current age"
+                    break
+            timeline = reconcile_timeline([], revised)
+        elif not timeline:
+            timeline = reconcile_timeline([], [TimelineEvent(
+                event_key="user-corrected-current-age", age=proposed.age, precision="exact",
+                summary="User-corrected current age",
+            )])
+        reference = derive_chat_reference(timeline, reference)
+    corrected = parsed.model_copy(update={"timeline": timeline, "chat_reference_point": reference})
+    updated = _snapshot_and_save(db, character_id, corrected, ChangeReason.USER_CORRECTION)
 
     db.add(
         CorrectionLog(character_id=character_id, user_instruction=user_instruction, resulting_version=updated.version)

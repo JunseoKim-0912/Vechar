@@ -6,15 +6,12 @@ FOCUSED_EXTRACTION_SYSTEM_PROMPT = """당신은 캐릭터 분석가입니다. �
 대한 정보만 추출해야 합니다. 다른 인물의 정보는 무시하세요. 지목된 인물이 직접 말하거나 행동하거나,
 다른 인물이 그 인물에 대해 언급하는 부분만 근거로 삼으세요.
 
-반드시 아래 JSON 스키마와 정확히 일치하는 JSON만 출력하세요. 다른 설명 없이 순수 JSON만 출력합니다.
-{
-  "personality_summary": "2-4문장으로 요약한 성격",
-  "speech_style": "말투, 어미, 존댓말/반말, 자주 쓰는 표현 등",
-  "background_facts": ["이 인물에 대한 배경 사실들"],
-  "relationships": ["다른 인물과의 관계"],
-  "sample_dialogues": ["이 인물이 실제로 한 말 그대로"],
-  "do_not_do": []
-}
+제공된 Structured Outputs schema의 모든 필드를 채우세요. typed timeline에는 이 인물에게 실제로 일어난 사건만
+발생 순서의 증거와 함께 기록하세요. 날짜를 지어내지 말고 모호한 시점은 uncertainty로 남기세요.
+비수치 이전/이후는 relative_order로 보존하고, 사후 사건은 death event의 이후로 연결하세요.
+chat_reference_point는 서버가 timeline에서 계산하므로 null로 반환하세요.
+Do not treat narrative order as chronological order. Separate flashbacks, recollections, dreams, forecasts,
+and current-time events. A flashback age/state must not replace the latest living canonical state.
 
 지목된 인물에 대한 근거를 텍스트에서 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요."""
 
@@ -38,7 +35,7 @@ def extract_character_from_world_text(
         task="analysis",
         instructions=FOCUSED_EXTRACTION_SYSTEM_PROMPT,
         input_messages=[{"role": "user", "content": f"지목된 인물: {character_name}\n\n{combined}"}],
-        max_output_tokens=4000,
+        max_output_tokens=8000,
         response_model=CharacterProfileData,
         input_policy="training",
     )

@@ -99,7 +99,8 @@ def send_message(
     user_message_id = user_turn.id
 
     instructions = build_chat_instructions(
-        character.name, profile_data, world_data, correction_prefix=CORRECTION_PREFIX, locale=locale
+        character.name, profile_data, world_data, correction_prefix=CORRECTION_PREFIX, locale=locale,
+        current_message=user_message,
     )
     budget = select_chat_context(
         instructions,

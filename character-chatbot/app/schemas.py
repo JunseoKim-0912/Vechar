@@ -6,6 +6,78 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 # This is the contract between the extraction/correction LLM calls and the DB.
 # Anything an LLM call returns is validated against this before it's allowed
 # to touch CharacterProfile.data.
+class RelationshipState(BaseModel):
+    name: str
+    status: str
+
+
+class TimelineStateChanges(BaseModel):
+    """Values that become true at this event; lists except knowledge replace prior lists."""
+
+    occupation: str | None = None
+    affiliations: list[str] | None = None
+    location: str | None = None
+    relationships: list[RelationshipState] = Field(default_factory=list)
+    physical_condition: str | None = None
+    abilities: list[str] | None = None
+    possessions: list[str] | None = None
+    knowledge: list[str] = Field(default_factory=list)
+    personality: str | None = None
+    speech_style: str | None = None
+    goals: list[str] | None = None
+    loyalties: list[str] | None = None
+
+
+class TimelineEvent(BaseModel):
+    """An event's occurrence time, independent of where it appears in a narrative."""
+
+    event_key: str
+    time_label: str = ""
+    absolute_year: int | None = None
+    absolute_date: str | None = None
+    age: int | None = None
+    relative_to: str | None = None
+    relative_offset_months: int | None = None
+    relative_order: Literal["before", "after", "same", "unknown"] = "unknown"
+    relative_label: str | None = None
+    precision: Literal["exact", "approximate", "relative", "unknown", "conflicting"] = "unknown"
+    narrative_role: Literal["main", "flashback", "exposition", "dream", "forecast", "hypothetical"] = "main"
+    canonicality: Literal["canonical", "noncanonical", "uncertain"] = "canonical"
+    is_death: bool = False
+    summary: str = ""
+    state_changes: TimelineStateChanges = Field(default_factory=TimelineStateChanges)
+    source_ids: list[str] = Field(default_factory=list)
+    temporal_uncertainty: str = ""
+    evidence_conflicts: list[str] = Field(default_factory=list)
+    sequence_index: int | None = None  # Derived by reconciliation, never source/narrative order.
+
+
+class CanonicalCharacterState(BaseModel):
+    age: int | None = None
+    occupation: str | None = None
+    affiliations: list[str] = Field(default_factory=list)
+    location: str | None = None
+    relationships: list[RelationshipState] = Field(default_factory=list)
+    physical_condition: str | None = None
+    abilities: list[str] = Field(default_factory=list)
+    possessions: list[str] = Field(default_factory=list)
+    knowledge: list[str] = Field(default_factory=list)
+    personality: str | None = None
+    speech_style: str | None = None
+    goals: list[str] = Field(default_factory=list)
+    loyalties: list[str] = Field(default_factory=list)
+
+
+class ChatReferencePoint(BaseModel):
+    event_key: str | None = None
+    phase: Literal["at_event", "immediately_before_death"] = "at_event"
+    age: int | None = None
+    status: Literal["alive", "deceased_in_canon", "unknown"] = "unknown"
+    summary: str = ""
+    reason: str = ""
+    state: CanonicalCharacterState = Field(default_factory=CanonicalCharacterState)
+
+
 class CharacterProfileData(BaseModel):
     personality_summary: str = ""
     speech_style: str = ""
@@ -13,6 +85,8 @@ class CharacterProfileData(BaseModel):
     relationships: list[str] = Field(default_factory=list)
     sample_dialogues: list[str] = Field(default_factory=list)
     do_not_do: list[str] = Field(default_factory=list)
+    timeline: list[TimelineEvent] = Field(default_factory=list)
+    chat_reference_point: ChatReferencePoint | None = None
 
 
 class CharacterSynthesisResult(BaseModel):

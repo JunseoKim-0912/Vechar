@@ -12,16 +12,20 @@ EXTRACTION_SYSTEM_PROMPT_TEMPLATE = """당신은 캐릭터 분석가입니다. �
 - 만약 텍스트에 "{character_name}"이라는 이름이 전혀 등장하지 않거나 근거를 찾을 수 없다면, 다른 인물의 정보로
   대신 채우지 말고 해당 필드를 빈 문자열/빈 배열로 두세요.
 
-반드시 아래 JSON 스키마와 정확히 일치하는 JSON만 출력하세요. 다른 설명, 인사말, 마크다운 코드블록 없이 순수 JSON만 출력합니다.
+제공된 Structured Outputs schema의 모든 필드를 채우세요. timeline은 사건의 실제 발생 시점에 따른 typed event 목록입니다.
+각 사건에는 구별 가능한 event_key, 근거 있는 age/absolute_year/date, relative_to와 signed relative_offset_months,
+precision, narrative_role, canonicality, death flag, state_changes를 기록하세요. 알 수 없는 날짜/나이는 null로 두세요.
+absolute_date는 근거 있는 ISO YYYY-MM-DD만 사용하세요. 비수치 "이전/이후"는 relative_order로 보존하세요.
+기존 canonical timeline에 같은 사건이 있다면 event_key를 재사용하세요. source_ids와 sequence_index는 서버가 채웁니다.
+chat_reference_point는 서버가 timeline을 reconcile한 뒤 계산하므로 null로 반환하세요.
 
-{{
-  "personality_summary": "2-4문장으로 요약한 성격",
-  "speech_style": "말투, 어미, 존댓말/반말, 자주 쓰는 표현 등",
-  "background_facts": ["텍스트에서 확인 가능한 배경 사실들"],
-  "relationships": ["다른 인물과의 관계 (있다면)"],
-  "sample_dialogues": ["말투를 보여주는 원문 그대로의 짧은 대사 몇 개"],
-  "do_not_do": []
-}}
+Do not treat narrative order as chronological order. Identify flashbacks, recollections, historical exposition,
+dreams, forecasts, and current-time events separately. Place actual canonical events at their occurrence time.
+An age or state inside a flashback must not replace the latest living canonical age/state.
+Prophecies, dreams, hypotheticals, and post-death events are not the character's lived current state.
+If a post-death event shares the death age/year, link it to the death event with relative_to and
+relative_order="after" so it cannot enter the final living state.
+For relative expressions such as three years later, preserve the relation (+36 months) without inventing a year.
 
 텍스트에서 근거를 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요.
 
@@ -62,7 +66,7 @@ def extract_profile_from_text(
                 f"Source text:\n---\n{raw_text}\n---"
             ),
         }],
-        max_output_tokens=2000,
+        max_output_tokens=8000,
         response_model=CharacterProfileData,
         input_policy="training",
     )

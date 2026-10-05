@@ -184,7 +184,7 @@ async def upload_training_source(
         source.status = IngestStatus.EXTRACTED
         db.commit()
 
-        updated_profile = merge_training_source(db, user_id, character.id, extracted)
+        updated_profile = merge_training_source(db, user_id, character.id, extracted, source_id=source.id)
 
         source.status = IngestStatus.MERGED
         db.commit()

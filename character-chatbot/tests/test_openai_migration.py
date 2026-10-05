@@ -121,7 +121,7 @@ class ServiceMigrationTests(unittest.TestCase):
             )
         self.assertEqual(result.personality_summary, "차분함")
         self.assertIn("가상 인물", call.call_args.kwargs["instructions"])
-        self.assertEqual(call.call_args.kwargs["max_output_tokens"], 2000)
+        self.assertEqual(call.call_args.kwargs["max_output_tokens"], 8000)
         self.assertEqual(call.call_args.kwargs["task"], "analysis")
         self.assertIs(call.call_args.kwargs["response_model"], CharacterProfileData)
 

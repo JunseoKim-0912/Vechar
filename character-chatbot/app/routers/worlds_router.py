@@ -287,16 +287,19 @@ def extract_character_from_world(
     db.commit()
     db.refresh(character)
 
-    db.add(
-        TrainingSource(
-            character_id=character.id,
-            source_type=SourceType.WORLD_DERIVED,
-            raw_text=f"[세계관 '{world.name}'에서 자동 추출됨]",
-            char_count=0,
-            extracted_data=extracted.model_dump(),
-            status=IngestStatus.MERGED,
-        )
+    training_source = TrainingSource(
+        character_id=character.id,
+        source_type=SourceType.WORLD_DERIVED,
+        raw_text=f"[세계관 '{world.name}'에서 자동 추출됨]",
+        char_count=0,
+        extracted_data=extracted.model_dump(),
+        status=IngestStatus.MERGED,
     )
+    db.add(training_source)
+    db.flush()
+    for event in extracted.timeline:
+        event.source_ids = list(dict.fromkeys(event.source_ids + [training_source.id]))
+    training_source.extracted_data = extracted.model_dump()
     set_initial_profile(db, character.id, extracted)
     db.commit()
 
