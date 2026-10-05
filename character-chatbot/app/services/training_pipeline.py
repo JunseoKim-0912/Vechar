@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..llm import generate_structured, make_training_text_counter
 from ..llm_config import (
-    DIRECT_TRAINING_SOURCE_TOKENS, MAX_EXISTING_WORLD_SYNTHESIS_FACTS,
+    CHARACTER_EXTRACTION_OUTPUT_TOKENS, DIRECT_TRAINING_SOURCE_TOKENS, MAX_EXISTING_WORLD_SYNTHESIS_FACTS,
     MAX_TIMELINE_SYNTHESIS_SUMMARY_CHARS, TRAINING_TOKEN_COUNT_SEGMENT_BYTES,
 )
 from ..models import IngestStatus, TrainingSource, WorldSource
@@ -152,7 +152,7 @@ def train_character_source(
     existing_row = get_profile(db, source.character_id)
     canonical = CharacterProfileData.model_validate(existing_row.data) if existing_row else None
     run = _extract(
-        db, user_id, source.id, source.raw_text, "character_extraction", 8000,
+        db, user_id, source.id, source.raw_text, "character_extraction", CHARACTER_EXTRACTION_OUTPUT_TOKENS,
         direct=lambda text: extract(db, user_id, text, source.source_type, character_name, canonical),
         chunk_extract=lambda chunk: extract(
             db, user_id, chunk.text, source.source_type, character_name, canonical, chunk=chunk,

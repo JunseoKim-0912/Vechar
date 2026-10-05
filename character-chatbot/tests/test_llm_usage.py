@@ -684,7 +684,13 @@ class LLMUsageTests(unittest.TestCase):
                 with patch.object(llm, "_get_client", return_value=client):
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         results = list(pool.map(lambda _: run(), range(2)))
-        self.assertCountEqual(results, ["OK", "request_exceeds_remaining_daily_budget"])
+        # SQLite stores Numeric through floating point; at this tiny boundary
+        # the second request may observe the first reservation as exactly the
+        # limit or infinitesimally below it. Both reject before generation.
+        self.assertEqual(results.count("OK"), 1)
+        self.assertEqual(len(results), 2)
+        self.assertIn(next(result for result in results if result != "OK"),
+                      {"daily_limit_reached", "request_exceeds_remaining_daily_budget"})
         self.assertEqual(client.responses.create.call_count, 1)
 
     def test_http_route_preserves_clear_429_error(self):

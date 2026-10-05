@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 from ..llm import generate_structured
+from ..llm_config import CHARACTER_EXTRACTION_OUTPUT_TOKENS
 from ..schemas import CharacterProfileData
 from ..models import SourceType
 from .training_chunker import TrainingChunk
@@ -82,7 +83,7 @@ def extract_profile_from_text(
                 f"{chunk_hint}Source text:\n---\n{raw_text}\n---"
             ),
         }],
-        max_output_tokens=8000,
+        max_output_tokens=CHARACTER_EXTRACTION_OUTPUT_TOKENS,
         response_model=CharacterProfileData,
         input_policy="training",
     )

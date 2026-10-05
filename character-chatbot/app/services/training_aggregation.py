@@ -48,14 +48,15 @@ def aggregate_character_evidence(
             event = original.model_copy(deep=True)
             event.source_ids = _dedupe(event.source_ids + [source_id])
             event.chunk_indices = list(dict.fromkeys(event.chunk_indices + [piece.chunk.index]))
-            # Only adjacent overlapping chunks get a fallback description match;
-            # distant identical wording may describe distinct repeated events.
+            # Only adjacent overlapping core spans get a fallback description
+            # match. Adaptive children retain stable IDs but not consecutive
+            # numeric chunk indices; source coordinates define adjacency.
             signature = (_key(event.summary), event.age, event.absolute_year, event.absolute_date)
-            matching = next((key for key, index in signatures.get(signature, [])
-                             if piece.chunk.has_overlap and index == piece.chunk.index - 1), None)
+            matching = next((key for key, prior_end in signatures.get(signature, [])
+                             if piece.chunk.has_overlap and prior_end == piece.chunk.core_start), None)
             if signature[0] and matching:
                 event.event_key = matching
-            signatures.setdefault(signature, []).append((event.event_key, piece.chunk.index))
+            signatures.setdefault(signature, []).append((event.event_key, piece.chunk.core_end))
             events.append(event)
     timeline = reconcile_timeline([], events)
     return CharacterProfileData(

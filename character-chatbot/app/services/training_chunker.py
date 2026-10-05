@@ -7,6 +7,7 @@ import unicodedata
 from collections.abc import Callable
 
 from ..llm_config import (
+    ADAPTIVE_SPLIT_OVERLAP_TOKENS, MIN_ADAPTIVE_CHUNK_TOKENS,
     TRAINING_CHUNK_HARD_MAX_TOKENS, TRAINING_CHUNK_OVERLAP_TOKENS,
     TRAINING_CHUNK_TARGET_TOKENS,
 )
@@ -160,3 +161,73 @@ def build_training_chunks(
                           token_end=token_end, overlap_tokens=overlap, text=text)
             for index, (start, core_start, end, token_start, token_end, overlap, text)
             in enumerate(drafts, 1)]
+
+
+def split_training_chunk(
+    source: str, parent: TrainingChunk, count_tokens: Callable[[str], int],
+) -> tuple[TrainingChunk, TrainingChunk] | None:
+    """Bisect one core span at a semantic boundary; never re-plan other chunks."""
+    core = source[parent.core_start:parent.core_end]
+    if len(core) < 2 or count_tokens(core) < 2 * MIN_ADAPTIVE_CHUNK_TOKENS:
+        return None
+    midpoint = len(core) // 2
+    boundaries = [
+        (position, rank) for position, rank in _boundaries(core)
+        if len(core) // 4 <= position <= 3 * len(core) // 4
+    ]
+    # Evaluate only a bounded number of good boundaries. Exact token counts,
+    # not character ratios, determine whether both children are viable.
+    candidates = sorted(boundaries, key=lambda item: (item[1], abs(item[0] - midpoint)))[:12]
+    viable: list[tuple[int, int, int, int]] = []
+    for relative, rank in candidates:
+        left_tokens = count_tokens(core[:relative])
+        right_tokens = count_tokens(core[relative:])
+        if (min(left_tokens, right_tokens) >= MIN_ADAPTIVE_CHUNK_TOKENS
+                and max(left_tokens, right_tokens) * 100 <= (left_tokens + right_tokens) * 65):
+            viable.append((rank, abs(left_tokens - right_tokens), relative, left_tokens))
+    if viable:
+        _, _, relative, left_tokens = min(viable)
+    else:
+        # A dense passage may have no safe semantic boundary near the middle.
+        # Binary search gives a bounded token-balanced hard cut without splitting
+        # UTF-8 bytes or Unicode combining sequences.
+        lower, upper = 1, len(core) - 1
+        target = count_tokens(core) // 2
+        relative, best_error = midpoint, abs(count_tokens(core[:midpoint]) - target)
+        for _ in range(len(core).bit_length() + 1):
+            if lower > upper:
+                break
+            probe = _safe_cut(core, (lower + upper) // 2, 0)
+            measured = count_tokens(core[:probe])
+            if abs(measured - target) < best_error:
+                relative, best_error = probe, abs(measured - target)
+            if measured == target:
+                relative = probe
+                break
+            if measured < target:
+                lower = probe + 1
+            else:
+                upper = probe - 1
+        left_tokens = count_tokens(core[:relative])
+        right_tokens = count_tokens(core[relative:])
+        if min(left_tokens, right_tokens) < MIN_ADAPTIVE_CHUNK_TOKENS:
+            return None
+    cut = parent.core_start + relative
+    chars_per_token = len(core) / max(1, left_tokens + count_tokens(core[relative:]))
+    overlap_start = max(parent.core_start, cut - max(1, int(chars_per_token * ADAPTIVE_SPLIT_OVERLAP_TOKENS)))
+    overlap_start = _safe_cut(source, overlap_start, parent.core_start - 1)
+    overlap_tokens = count_tokens(source[overlap_start:cut])
+    while overlap_tokens > ADAPTIVE_SPLIT_OVERLAP_TOKENS and overlap_start < cut:
+        reduction = max(1, int((cut - overlap_start) *
+                               (overlap_tokens - ADAPTIVE_SPLIT_OVERLAP_TOKENS) / overlap_tokens))
+        overlap_start = _safe_cut(source, overlap_start + reduction, overlap_start)
+        overlap_tokens = count_tokens(source[overlap_start:cut])
+    mid_token = min(parent.token_end, parent.token_start + left_tokens)
+    return (
+        TrainingChunk(0, 0, parent.source_start, parent.core_start, cut,
+                      parent.token_start, mid_token, parent.overlap_tokens,
+                      source[parent.source_start:cut]),
+        TrainingChunk(0, 0, overlap_start, cut, parent.core_end,
+                      mid_token, parent.token_end, overlap_tokens,
+                      source[overlap_start:parent.core_end]),
+    )

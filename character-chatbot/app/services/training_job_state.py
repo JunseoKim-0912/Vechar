@@ -18,6 +18,7 @@ class ChunkStatus(StrEnum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+    SPLIT = "split"
 
 
 ACTIVE_JOBS = frozenset({JobStatus.QUEUED, JobStatus.CHUNKING, JobStatus.EXTRACTING, JobStatus.SYNTHESIZING})

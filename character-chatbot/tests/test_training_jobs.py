@@ -1,9 +1,11 @@
 """Queue orchestration tests; every LLM call is a local mock."""
 
 import asyncio
+import os
 import unittest
 from datetime import timedelta
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import httpx2
 from fastapi import HTTPException
@@ -13,10 +15,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
+from app import llm
 from app.llm_failures import FailureKind, LLMResponseError, LLMStructuredOutputError
 from app.llm_operation import current_operation
-from app.models import Character, CharacterProfile, TrainingJob, TrainingJobChunk, TrainingSource, User, World, WorldProfile, WorldSource
-from app.schemas import CharacterProfileData, CharacterSynthesisResult, WorldProfileData
+from app.models import Character, CharacterProfile, LLMUsage, TrainingJob, TrainingJobChunk, TrainingSource, User, World, WorldProfile, WorldSource
+from app.schemas import CharacterProfileData, CharacterSynthesisResult, TimelineEvent, WorldProfileData
 from app.services import training_jobs, training_pipeline
 from app.services.training_job_state import MAX_CHUNK_ATTEMPTS
 from app.services.training_queue import InMemoryTrainingQueue
@@ -31,6 +34,8 @@ class TrainingJobWorkerTests(unittest.TestCase):
         self.session_patch.start()
         self.counter_patch = patch.object(training_pipeline, "make_training_text_counter", return_value=len)
         self.counter_patch.start()
+        self.split_counter_patch = patch.object(training_jobs, "make_training_text_counter", return_value=len)
+        self.split_counter_patch.start()
         self.queue = InMemoryTrainingQueue()
         with self.sessions() as db:
             user = User(email="worker@example.invalid", password_hash="unused")
@@ -43,6 +48,7 @@ class TrainingJobWorkerTests(unittest.TestCase):
             self.user_id, self.character_id, self.world_id = user.id, character.id, world.id
 
     def tearDown(self):
+        self.split_counter_patch.stop()
         self.counter_patch.stop()
         self.session_patch.stop()
         self.engine.dispose()
@@ -65,6 +71,171 @@ class TrainingJobWorkerTests(unittest.TestCase):
         with self.sessions() as db:
             chunks = db.query(TrainingJobChunk).filter_by(job_id=job_id).order_by(TrainingJobChunk.chunk_index).all()
             return [c.id for c in chunks]
+
+    def children(self, job_id, parent_id):
+        with self.sessions() as db:
+            return [row.id for row in db.query(TrainingJobChunk).filter_by(
+                job_id=job_id, parent_chunk_id=parent_id,
+            ).order_by(TrainingJobChunk.child_order).all()]
+
+    def test_output_cap_splits_only_failed_chunk_and_settles_parent_and_children(self):
+        job_id = self.submit(text="A" * 25_667)
+        first, second = self.plan(job_id)
+        evidence = CharacterProfileData(personality_summary="salient").model_dump_json()
+        synthesis = CharacterSynthesisResult(personality_summary="canonical", speech_style="quiet").model_dump_json()
+
+        def response(status, output, output_tokens, response_id):
+            return SimpleNamespace(
+                id=response_id, status=status, model="gpt-6.1-sol", output_text=output,
+                output=[], incomplete_details=(SimpleNamespace(reason="max_output_tokens")
+                                               if status == "incomplete" else None),
+                usage=SimpleNamespace(input_tokens=100, output_tokens=output_tokens,
+                                      total_tokens=100 + output_tokens,
+                                      input_tokens_details=SimpleNamespace(cached_tokens=0),
+                                      output_tokens_details=SimpleNamespace(reasoning_tokens=output_tokens // 2)),
+            )
+
+        client = Mock()
+        client.responses.input_tokens.count.return_value = SimpleNamespace(input_tokens=100)
+        client.responses.create.side_effect = [
+            response("completed", evidence, 100, "resp-first"),
+            response("incomplete", "", 8000, "resp-overflow"),
+            response("completed", evidence, 90, "resp-child-one"),
+            response("completed", evidence, 95, "resp-child-two"),
+            response("completed", synthesis, 80, "resp-final"),
+        ]
+        with patch.dict(os.environ, {"OPENAI_ANALYSIS_MODEL": "gpt-6.1-sol"}), \
+             patch.object(llm, "_get_client", return_value=client):
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, first, self.queue)), "done")
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, second, self.queue)), "done")
+            children = self.children(job_id, second)
+            self.assertEqual(len(children), 2)
+            self.assertEqual(self.run_async(training_jobs.process_finalize(job_id)), "busy")
+            for child_id in children:
+                self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, child_id, self.queue)), "done")
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, children[0], self.queue)), "done")
+            self.assertEqual(self.run_async(training_jobs.process_finalize(job_id)), "done")
+        self.assertEqual(client.responses.create.call_count, 5)
+        with self.sessions() as db:
+            job = db.get(TrainingJob, job_id)
+            self.assertEqual((job.status, job.total_chunks, job.completed_chunks), ("completed", 3, 3))
+            self.assertEqual(db.get(TrainingJobChunk, first).attempt_count, 1)
+            self.assertEqual(db.get(TrainingJobChunk, second).status, "split")
+            rows = db.query(LLMUsage).filter_by(user_id=self.user_id).all()
+            self.assertEqual(len(rows), 5)
+            parent_usage = next(row for row in rows if row.provider_response_id == "resp-overflow")
+            self.assertEqual((parent_usage.status, parent_usage.output_tokens,
+                              str(parent_usage.estimated_cost_usd)),
+                             ("failed_response", 8000, "0.08020000"))
+            child_keys = [row.operation_key for row in rows if row.provider_response_id in
+                          {"resp-child-one", "resp-child-two"}]
+            self.assertEqual(len(set(child_keys)), 2)
+            self.assertTrue(all(key and "chunk:" in key for key in child_keys))
+            self.assertTrue(all(row.reconciled_at is not None for row in rows))
+            self.assertEqual(db.query(CharacterProfile).one().data["personality_summary"], "canonical")
+
+    def test_output_cap_fallback_is_bounded_and_replays_parent_without_duplicate_children(self):
+        job_id = self.submit(text="B" * 12_000)
+        root = self.plan(job_id)[0]
+        error = LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=error) as extract:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+            children = self.children(job_id, root)
+            self.assertEqual(len(children), 2)
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+            self.assertEqual(self.children(job_id, root), children)
+            self.assertEqual(extract.call_count, 1)
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, children[0], self.queue)), "done")
+            grandchildren = self.children(job_id, children[0])
+            self.assertEqual(len(grandchildren), 2)
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, grandchildren[0], self.queue)), "done")
+            self.assertEqual(extract.call_count, 3)
+        with self.sessions() as db:
+            self.assertEqual(db.get(TrainingJob, job_id).error_code, "llm_output_limit")
+            self.assertEqual(db.get(TrainingJobChunk, grandchildren[0]).split_depth, 2)
+            self.assertEqual(db.query(TrainingJobChunk).filter_by(job_id=job_id).count(), 5)
+
+    def test_adaptive_children_preserve_overlap_dedup_and_flashback_chronology(self):
+        job_id = self.submit(text="C" * 12_000)
+        root = self.plan(job_id)[0]
+        error = LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=error):
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+        children = self.children(job_id, root)
+        duplicate = lambda key: TimelineEvent(event_key=key, age=20, summary="Shared boundary event")
+        evidence = [
+            CharacterProfileData(timeline=[
+                duplicate("left"), TimelineEvent(event_key="death", age=30, summary="Death", is_death=True),
+            ]),
+            CharacterProfileData(timeline=[
+                duplicate("right"), TimelineEvent(event_key="youth", age=10, summary="Early childhood",
+                                                  narrative_role="flashback"),
+            ]),
+        ]
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=evidence):
+            for child in children:
+                self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, child, self.queue)), "done")
+        with patch.object(training_pipeline, "generate_structured", return_value=CharacterSynthesisResult(
+            personality_summary="canonical", speech_style="quiet",
+        )):
+            self.assertEqual(self.run_async(training_jobs.process_finalize(job_id)), "done")
+        with self.sessions() as db:
+            profile = CharacterProfileData.model_validate(db.query(CharacterProfile).one().data)
+            self.assertEqual([event.age for event in profile.timeline], [10, 20, 30])
+            self.assertEqual(profile.chat_reference_point.age, 30)
+            self.assertEqual(profile.chat_reference_point.phase, "immediately_before_death")
+
+    def test_cancellation_after_split_makes_delayed_child_deliveries_no_ops(self):
+        job_id = self.submit(text="D" * 12_000)
+        root = self.plan(job_id)[0]
+        with patch.object(training_jobs, "extract_profile_from_text",
+                          side_effect=LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")):
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+        children = self.children(job_id, root)
+        with self.sessions() as db:
+            training_jobs.cancel_target_jobs(db, user_id=self.user_id, target_type="character",
+                                             target_id=self.character_id)
+            db.delete(db.get(Character, self.character_id))
+            db.commit()
+        with patch.object(training_jobs, "extract_profile_from_text") as extract:
+            for child in children:
+                self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, child, self.queue)), "done")
+            extract.assert_not_called()
+
+    def test_french_and_english_sources_use_same_output_cap_fallback(self):
+        for text in ("Il se souvient de son enfance. " * 400,
+                     "He remembers his childhood. " * 450):
+            with self.subTest(language=text[:2]):
+                job_id = self.submit(text=text)
+                root = self.plan(job_id)[0]
+                with patch.object(training_jobs, "extract_profile_from_text",
+                                  side_effect=LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")):
+                    self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+                self.assertEqual(len(self.children(job_id, root)), 2)
+
+    def test_long_chunk_schema_failure_does_not_split(self):
+        job_id = self.submit(text="E" * 12_000)
+        root = self.plan(job_id)[0]
+        with patch.object(training_jobs, "extract_profile_from_text",
+                          side_effect=LLMStructuredOutputError("invalid")) as extract:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+            extract.assert_called_once()
+        self.assertEqual(self.children(job_id, root), [])
+        with self.sessions() as db:
+            self.assertEqual(db.get(TrainingJob, job_id).error_code, "llm_structured_output_invalid")
+
+    def test_split_publish_failure_replays_saved_children_without_reextracting_parent(self):
+        job_id = self.submit(text="F" * 12_000)
+        root = self.plan(job_id)[0]
+        with patch.object(training_jobs, "extract_profile_from_text",
+                          side_effect=LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")) as extract, \
+             patch.object(self.queue, "publish_chunk", side_effect=[RuntimeError("queue down"), None, None]):
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "retry")
+            children = self.children(job_id, root)
+            self.assertEqual(len(children), 2)
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+            self.assertEqual(self.children(job_id, root), children)
+            extract.assert_called_once()
 
     def test_direct_character_and_world_complete_and_clear_private_artifacts(self):
         for kind in ("character", "world"):
@@ -243,6 +414,10 @@ class TrainingJobWorkerTests(unittest.TestCase):
             profile = db.query(CharacterProfile).one()
             self.assertEqual(profile.data["personality_summary"], "synthesized")
             self.assertEqual(db.get(TrainingJob, job_id).completed_chunks, len(chunks))
+            self.assertEqual(db.query(TrainingJobChunk).filter(
+                TrainingJobChunk.job_id == job_id,
+                TrainingJobChunk.parent_chunk_id.is_not(None),
+            ).count(), 0)
 
     def test_final_synthesis_failure_preserves_existing_profile(self):
         with self.sessions() as db:

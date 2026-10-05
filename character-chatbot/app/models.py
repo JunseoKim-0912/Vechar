@@ -344,13 +344,18 @@ class TrainingJobChunk(Base):
     __tablename__ = "training_job_chunks"
     __table_args__ = (
         UniqueConstraint("job_id", "chunk_index", name="uq_training_job_chunk_index"),
-        CheckConstraint("status IN ('queued', 'processing', 'completed', 'failed')", name="ck_training_job_chunk_status"),
+        UniqueConstraint("job_id", "parent_chunk_id", "child_order", name="uq_training_job_chunk_child"),
+        CheckConstraint("status IN ('queued', 'processing', 'completed', 'failed', 'split')", name="ck_training_job_chunk_status"),
         Index("ix_training_job_chunks_job_status", "job_id", "status"),
+        Index("ix_training_job_chunks_parent", "parent_chunk_id"),
     )
 
     id = Column(String, primary_key=True, default=gen_uuid)
     job_id = Column(String, ForeignKey("training_jobs.id", ondelete="CASCADE"), nullable=False)
     chunk_index = Column(Integer, nullable=False)
+    parent_chunk_id = Column(String, nullable=True)
+    split_depth = Column(Integer, nullable=False, default=0, server_default="0")
+    child_order = Column(Integer, nullable=True)
     status = Column(String, nullable=False, default="queued")
     source_start = Column(Integer, nullable=False)
     core_start = Column(Integer, nullable=False)

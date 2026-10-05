@@ -12,6 +12,7 @@ MODEL_ENV_VARS = {
 # Provisional server-side safety limits. Review before production rollout.
 # The existing largest service request needs 8,000 output tokens for a full world profile.
 MAX_LLM_OUTPUT_TOKENS = 8000
+CHARACTER_EXTRACTION_OUTPUT_TOKENS = MAX_LLM_OUTPUT_TOKENS
 MAX_LLM_INPUT_BYTES = 60000
 # JSON-serialized training input can expand control characters to six bytes each.
 # Chat keeps its separate 60 KB guard.
@@ -26,6 +27,10 @@ TRAINING_CHUNK_TARGET_TOKENS = 12_000
 TRAINING_CHUNK_HARD_MAX_TOKENS = 18_000
 TRAINING_CHUNK_OVERLAP_TOKENS = 750
 DIRECT_TRAINING_SOURCE_TOKENS = TRAINING_CHUNK_HARD_MAX_TOKENS
+# Only character output-cap failures can use this bounded, local fallback.
+MAX_ADAPTIVE_SPLIT_DEPTH = 2
+MIN_ADAPTIVE_CHUNK_TOKENS = 3_000
+ADAPTIVE_SPLIT_OVERLAP_TOKENS = 128
 # Count exceptionally large UTF-8 source text in pieces so even token-dense
 # 300k-character input need not fit a single model context just for planning.
 TRAINING_TOKEN_COUNT_SEGMENT_BYTES = 750_000

@@ -12,9 +12,11 @@ class LLMOperation:
     stage: str
     attempt: int
     chunk_index: int | None = None
+    chunk_key: str | None = None
 
     def key(self, request_type: str) -> str:
-        part = f"chunk:{self.chunk_index}" if self.chunk_index is not None else "finalize"
+        identity = self.chunk_key if self.chunk_key is not None else self.chunk_index
+        part = f"chunk:{identity}" if identity is not None else "finalize"
         return f"training:{self.job_id}:{part}:{self.stage}:{self.attempt}:{request_type}"
 
 
