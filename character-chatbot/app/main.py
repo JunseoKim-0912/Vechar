@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from .database import Base, engine
+from .database import engine
 from .routers import auth_router, characters_router, upload_router
 from .routers import chat_router
 from .routers import worlds_router
@@ -32,13 +32,6 @@ app.add_middleware(
 if upload_router.LOCAL_UPLOADS_ENABLED:
     os.makedirs("uploads", exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
-
-@app.on_event("startup")
-def on_startup():
-    # 프로토타입 단계의 테이블 생성 방식입니다. 스키마가 안정되면
-    # Alembic 마이그레이션으로 바꿔서 데이터를 지우지 않고 스키마를 바꿀 수 있게 하세요.
-    Base.metadata.create_all(bind=engine)
 
 
 @app.get("/health")
