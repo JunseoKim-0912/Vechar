@@ -67,6 +67,29 @@ def make_chat_input_counter(db: Session, user_id: str, output_cap: int) -> Calla
     return count
 
 
+def make_training_text_counter(
+    db: Session, user_id: str, request_type: str, output_cap: int,
+) -> Callable[[str], int]:
+    """Exact source-text counts for direct/chunk decisions through the shared gateway.
+
+    Generation still repeats the authoritative full-payload count and reservation.
+    Reusing one client avoids creating a connection for every candidate boundary.
+    """
+    model = model_for_task("analysis")
+    bind = db.get_bind()
+    check_capacity(bind, user_id, model, output_cap)
+    client = _get_client()
+
+    def count(text: str) -> int:
+        try:
+            return _count_input_tokens(client, model, "", [{"role": "user", "content": text}])
+        except Exception as exc:
+            record_preflight_failure(bind, user_id, request_type, model, type(exc).__name__)
+            raise
+
+    return count
+
+
 def generate_text(
     db: Session,
     user_id: str,

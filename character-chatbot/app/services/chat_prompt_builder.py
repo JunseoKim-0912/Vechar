@@ -41,6 +41,7 @@ Current affiliations: {' / '.join(state.affiliations) or '(unknown)'}
 Current location: {state.location or '(unknown)'}
 Current relationships: {relationships}
 Current physical condition: {state.physical_condition or '(unknown)'}
+Current mental condition: {state.mental_condition or '(unknown)'}
 Current abilities: {' / '.join(state.abilities) or '(unknown)'}
 Current possessions: {' / '.join(state.possessions) or '(unknown)'}
 Current goals: {' / '.join(state.goals) or '(unknown)'}

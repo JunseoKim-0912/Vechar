@@ -15,7 +15,8 @@ from ..schemas import (
     RollbackRequest,
 )
 from ..services.extraction_service import extract_profile_from_text
-from ..services.character_profile_service import merge_training_source, get_profile, set_initial_profile
+from ..services.character_profile_service import get_profile, set_initial_profile
+from ..services.training_pipeline import train_character_source
 from ..training_source import parse_training_request
 from ..services.world_profile_service import get_or_create_default_world
 from ..services import memory_service
@@ -173,21 +174,9 @@ async def upload_training_source(
     db.refresh(source)
 
     try:
-        existing_profile = get_profile(db, character.id)
-        canonical_profile = (
-            CharacterProfileData.model_validate(existing_profile.data) if existing_profile else None
+        updated_profile = train_character_source(
+            db, user_id, source, character.name, extract_profile_from_text,
         )
-        extracted = extract_profile_from_text(
-            db, user_id, raw_text, source_type, character.name, canonical_profile
-        )
-        source.extracted_data = extracted.model_dump()
-        source.status = IngestStatus.EXTRACTED
-        db.commit()
-
-        updated_profile = merge_training_source(db, user_id, character.id, extracted, source_id=source.id)
-
-        source.status = IngestStatus.MERGED
-        db.commit()
 
         return {
             "source_id": source.id,
@@ -195,11 +184,13 @@ async def upload_training_source(
             "profile": CharacterProfileRead.model_validate(updated_profile),
         }
     except HTTPException as e:
+        db.rollback()
         source.status = IngestStatus.FAILED
         source.error_message = str(e.detail)
         db.commit()
         raise
     except Exception as e:
+        db.rollback()
         source.status = IngestStatus.FAILED
         source.error_message = str(e)
         db.commit()

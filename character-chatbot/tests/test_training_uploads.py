@@ -9,8 +9,9 @@ from sqlalchemy.pool import StaticPool
 from app import llm, main
 from app.auth import issue_token
 from app.database import Base, get_db
-from app.models import Character, TrainingSource, User, World, WorldSource
+from app.models import Character, CharacterProfile, TrainingSource, User, World, WorldProfile, WorldSource
 from app.routers import characters_router, worlds_router
+from app.services import training_pipeline
 from app.schemas import CharacterProfileData, WorldProfileData
 from app import training_source
 
@@ -37,6 +38,11 @@ class TrainingUploadTests(unittest.TestCase):
         self.engine_patch.start()
         self.no_network = patch.object(llm, "_get_client", side_effect=AssertionError("Unexpected OpenAI call"))
         self.no_network.start()
+        # Upload validation tests isolate transport from the separately tested
+        # token-based pipeline; no provider token-count request is made here.
+        self.counter_patch = patch.object(training_pipeline, "make_training_text_counter",
+                                          return_value=lambda text: 1)
+        self.counter_patch.start()
         self.character_extract = patch.object(
             characters_router, "extract_profile_from_text",
             return_value=CharacterProfileData(personality_summary="Mock profile"),
@@ -55,6 +61,7 @@ class TrainingUploadTests(unittest.TestCase):
         self.world_extract.stop()
         self.character_extract.stop()
         self.no_network.stop()
+        self.counter_patch.stop()
         self.engine_patch.stop()
         main.app.dependency_overrides.clear()
         self.engine.dispose()
@@ -163,6 +170,26 @@ class TrainingUploadTests(unittest.TestCase):
                     self._post(path, filename="source.txt", content=b"private", user_id=self.other_id).status_code,
                     404,
                 )
+
+    def test_chunk_failure_marks_source_failed_without_partial_profile(self):
+        for kind in ("character", "world"):
+            with self.subTest(kind=kind):
+                path = self._target(kind)
+                router = characters_router if kind == "character" else worlds_router
+                name = "extract_profile_from_text" if kind == "character" else "extract_world_profile_from_text"
+                result = (CharacterProfileData(personality_summary="partial") if kind == "character"
+                          else WorldProfileData(world_summary="partial"))
+                with patch.object(training_pipeline, "make_training_text_counter", return_value=len), \
+                     patch.object(router, name, side_effect=[result, RuntimeError("chunk failed")]):
+                    response = self._post(path, text="A" * 35_000)
+                self.assertEqual(response.status_code, 500)
+                with Session(self.engine) as db:
+                    source_model = TrainingSource if kind == "character" else WorldSource
+                    source = db.query(source_model).order_by(source_model.created_at.desc()).first()
+                    self.assertEqual(source.status.value, "FAILED")
+                    self.assertIsNone(source.extracted_data)
+                    profile_model = CharacterProfile if kind == "character" else WorldProfile
+                    self.assertEqual(db.query(profile_model).count(), 0)
 
 
 if __name__ == "__main__":

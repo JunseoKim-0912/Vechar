@@ -20,6 +20,18 @@ MAX_TRAINING_INPUT_BYTES = 2_000_000
 # and request overhead, using the provider's exact preflight token count.
 MAX_TRAINING_INPUT_TOKENS = 1_000_000
 
+# Source-text token budgets for synchronous training. Every generated request is
+# still checked with the provider's exact full-payload count in the LLM gateway.
+TRAINING_CHUNK_TARGET_TOKENS = 12_000
+TRAINING_CHUNK_HARD_MAX_TOKENS = 18_000
+TRAINING_CHUNK_OVERLAP_TOKENS = 750
+DIRECT_TRAINING_SOURCE_TOKENS = TRAINING_CHUNK_HARD_MAX_TOKENS
+# Count exceptionally large UTF-8 source text in pieces so even token-dense
+# 300k-character input need not fit a single model context just for planning.
+TRAINING_TOKEN_COUNT_SEGMENT_BYTES = 750_000
+MAX_TIMELINE_SYNTHESIS_SUMMARY_CHARS = 500
+MAX_EXISTING_WORLD_SYNTHESIS_FACTS = 100
+
 # USD per 1M text tokens. Estimates only: no regional uplift or non-text/tool fees.
 # Standard, short-context text prices: https://developers.openai.com/api/docs/models
 # Keep historical prices for previously recorded usage; update when API pricing changes.

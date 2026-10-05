@@ -94,6 +94,7 @@ Language policy:
 def merge_training_source(
     db: Session, user_id: str, character_id: str, newly_extracted: CharacterProfileData,
     source_id: str | None = None,
+    synthesized_persona: CharacterSynthesisResult | None = None,
 ) -> CharacterProfile:
     """새 TrainingSource가 추출된 뒤 호출됩니다 (extraction_service.py 참고)."""
     existing_row = get_profile(db, character_id)
@@ -125,10 +126,11 @@ def merge_training_source(
 
     # 첫 학습 소스라면 합성할 필요 없이 새 값을 그대로 사용합니다.
     if not existing_data.personality_summary and not existing_data.speech_style:
+        persona = synthesized_persona or newly_extracted
         initial = merged_arrays_only.model_copy(
             update={
-                "personality_summary": newly_extracted.personality_summary,
-                "speech_style": newly_extracted.speech_style,
+                "personality_summary": persona.personality_summary,
+                "speech_style": persona.speech_style,
             }
         )
         return _snapshot_and_save(db, character_id, initial, ChangeReason.TRAINING_INGEST)
@@ -141,7 +143,7 @@ def merge_training_source(
         return _snapshot_and_save(db, character_id, merged_arrays_only, ChangeReason.TRAINING_INGEST)
 
     # 두 번째 소스부터는 기존 요약과 새 요약을 자연스럽게 통합하도록 LLM에 위임합니다.
-    synthesized = generate_structured(
+    synthesized = synthesized_persona or generate_structured(
         db=db,
         user_id=user_id,
         request_type="character_synthesis",

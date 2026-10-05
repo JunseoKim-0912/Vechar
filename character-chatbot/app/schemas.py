@@ -19,6 +19,7 @@ class TimelineStateChanges(BaseModel):
     location: str | None = None
     relationships: list[RelationshipState] = Field(default_factory=list)
     physical_condition: str | None = None
+    mental_condition: str | None = None
     abilities: list[str] | None = None
     possessions: list[str] | None = None
     knowledge: list[str] = Field(default_factory=list)
@@ -47,6 +48,7 @@ class TimelineEvent(BaseModel):
     summary: str = ""
     state_changes: TimelineStateChanges = Field(default_factory=TimelineStateChanges)
     source_ids: list[str] = Field(default_factory=list)
+    chunk_indices: list[int] = Field(default_factory=list)
     temporal_uncertainty: str = ""
     evidence_conflicts: list[str] = Field(default_factory=list)
     sequence_index: int | None = None  # Derived by reconciliation, never source/narrative order.
@@ -59,6 +61,7 @@ class CanonicalCharacterState(BaseModel):
     location: str | None = None
     relationships: list[RelationshipState] = Field(default_factory=list)
     physical_condition: str | None = None
+    mental_condition: str | None = None
     abilities: list[str] = Field(default_factory=list)
     possessions: list[str] = Field(default_factory=list)
     knowledge: list[str] = Field(default_factory=list)

@@ -23,7 +23,7 @@ def _merge_changes(old: TimelineStateChanges, new: TimelineStateChanges, *, pref
                    conflicts: list[str]) -> TimelineStateChanges:
     result = old.model_copy(deep=True)
     for field in (
-        "occupation", "affiliations", "location", "physical_condition", "abilities",
+        "occupation", "affiliations", "location", "physical_condition", "mental_condition", "abilities",
         "possessions", "personality", "speech_style", "goals", "loyalties",
     ):
         incoming = getattr(new, field)
@@ -50,6 +50,7 @@ def _merge_event(old: TimelineEvent, new: TimelineEvent, *, prefer_new: bool) ->
     if prefer_new:
         corrected = new.model_copy(deep=True)
         corrected.source_ids = _unique(old.source_ids + new.source_ids)
+        corrected.chunk_indices = list(dict.fromkeys(old.chunk_indices + new.chunk_indices))
         return corrected
     result = old.model_copy(deep=True)
     temporal_conflicts = []
@@ -78,6 +79,7 @@ def _merge_event(old: TimelineEvent, new: TimelineEvent, *, prefer_new: bool) ->
         else:
             result.relative_order = new.relative_order
     result.source_ids = _unique(result.source_ids + new.source_ids)
+    result.chunk_indices = list(dict.fromkeys(result.chunk_indices + new.chunk_indices))
     result.is_death = new.is_death if prefer_new else result.is_death or new.is_death
     if result.canonicality != new.canonicality:
         result.canonicality = new.canonicality if prefer_new else "uncertain"
@@ -228,7 +230,7 @@ def _apply(state: CanonicalCharacterState, event: TimelineEvent) -> None:
         state.age = event.age
     changes = event.state_changes
     for field in (
-        "occupation", "affiliations", "location", "physical_condition", "abilities",
+        "occupation", "affiliations", "location", "physical_condition", "mental_condition", "abilities",
         "possessions", "personality", "speech_style", "goals", "loyalties",
     ):
         value = getattr(changes, field)

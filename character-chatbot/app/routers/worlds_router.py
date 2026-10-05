@@ -17,9 +17,9 @@ from ..schemas import (
     WorldImportRequest,
 )
 from ..services.world_extraction_service import extract_world_profile_from_text
+from ..services.training_pipeline import train_world_source
 from ..services.world_profile_service import (
     get_world_profile,
-    merge_world_source,
     apply_world_edit,
     summarize_world,
     compact_world_profile,
@@ -166,21 +166,7 @@ async def upload_world_source(
     db.refresh(source)
 
     try:
-        existing_profile = get_world_profile(db, world.id)
-        canonical_profile = (
-            WorldProfileData.model_validate(existing_profile.data) if existing_profile else None
-        )
-        extracted = extract_world_profile_from_text(
-            db, user_id, raw_text, source_type, series_name, episode_number, canonical_profile
-        )
-        source.extracted_data = extracted.model_dump()
-        source.status = IngestStatus.EXTRACTED
-        db.commit()
-
-        updated_profile = merge_world_source(db, user_id, world.id, extracted)
-
-        source.status = IngestStatus.MERGED
-        db.commit()
+        updated_profile = train_world_source(db, user_id, source, extract_world_profile_from_text)
 
         return {
             "source_id": source.id,
@@ -188,11 +174,13 @@ async def upload_world_source(
             "profile": WorldProfileRead.model_validate(updated_profile),
         }
     except HTTPException as e:
+        db.rollback()
         source.status = IngestStatus.FAILED
         source.error_message = str(e.detail)
         db.commit()
         raise
     except Exception as e:
+        db.rollback()
         source.status = IngestStatus.FAILED
         source.error_message = str(e)
         db.commit()

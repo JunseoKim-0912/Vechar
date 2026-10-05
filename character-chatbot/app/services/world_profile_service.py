@@ -126,7 +126,8 @@ WORLD_SYNTHESIS_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. 기�
 
 The existing summary is canonical. Preserve its dominant language, register, and style while understanding English, Korean, or mixed-language new information. Preserve established proper-name and fictional-term spellings, and avoid an accidental bilingual patchwork."""
 def merge_world_source(
-    db: Session, user_id: str, world_id: str, newly_extracted: WorldProfileData
+    db: Session, user_id: str, world_id: str, newly_extracted: WorldProfileData,
+    synthesized_summary: WorldSynthesisResult | None = None,
 ) -> WorldProfile:
     """새 WorldSource(화/설명)가 추출된 뒤 호출됩니다."""
     existing_row = get_world_profile(db, world_id)
@@ -146,10 +147,12 @@ def merge_world_source(
     )
 
     if not existing_data.world_summary:
-        initial = merged_arrays_only.model_copy(update={"world_summary": newly_extracted.world_summary})
+        initial = merged_arrays_only.model_copy(update={
+            "world_summary": synthesized_summary.world_summary if synthesized_summary else newly_extracted.world_summary,
+        })
         return _snapshot_and_save(db, world_id, initial, ChangeReason.TRAINING_INGEST)
 
-    synthesized = generate_structured(
+    synthesized = synthesized_summary or generate_structured(
         db=db,
         user_id=user_id,
         request_type="world_synthesis",
