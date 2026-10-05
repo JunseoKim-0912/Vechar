@@ -11,7 +11,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from app.database import Base
 from app import models  # noqa: F401 - populate Base.metadata
@@ -21,7 +21,7 @@ from app.main import app
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 INI_PATH = BACKEND_ROOT / "alembic.ini"
 INITIAL_REVISION = "0001_initial_schema"
-HEAD_REVISION = "0003_memory_ingestion"
+HEAD_REVISION = "0004_user_roles"
 
 
 class AlembicFoundationTests(unittest.TestCase):
@@ -34,7 +34,8 @@ class AlembicFoundationTests(unittest.TestCase):
         self.assertEqual(script.get_heads(), [HEAD_REVISION])
         self.assertIsNone(script.get_revision(INITIAL_REVISION).down_revision)
         self.assertEqual(script.get_revision("0002_training_jobs").down_revision, INITIAL_REVISION)
-        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0002_training_jobs")
+        self.assertEqual(script.get_revision("0003_memory_ingestion").down_revision, "0002_training_jobs")
+        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0003_memory_ingestion")
         self.assertIsNone(config.get_main_option("sqlalchemy.url"))
         ini_text = INI_PATH.read_text(encoding="utf-8")
         self.assertNotIn("postgresql://", ini_text)
@@ -78,6 +79,32 @@ class AlembicFoundationTests(unittest.TestCase):
                 self.assertIn("training_job_chunks", inspect(connection).get_table_names())
                 command.downgrade(config, INITIAL_REVISION)
                 self.assertEqual(set(inspect(connection).get_table_names()), baseline_tables)
+        finally:
+            engine.dispose()
+
+    def test_role_upgrade_preserves_existing_free_and_premium_tiers(self):
+        engine = create_engine("sqlite://")
+        try:
+            with engine.connect() as connection:
+                config = self.make_config()
+                config.attributes["connection"] = connection
+                command.upgrade(config, "0003_memory_ingestion")
+                for user_id, premium in (("free-user", False), ("premium-user", True)):
+                    connection.execute(text(
+                        "INSERT INTO users (id, email, password_hash, is_premium) "
+                        "VALUES (:id, :email, :password_hash, :premium)"
+                    ), {"id": user_id, "email": f"{user_id}@example.invalid",
+                        "password_hash": "unused", "premium": premium})
+                connection.commit()
+                command.upgrade(config, HEAD_REVISION)
+                rows = connection.execute(text(
+                    "SELECT id, is_premium, role FROM users ORDER BY id"
+                )).all()
+                self.assertEqual(rows, [("free-user", 0, "user"), ("premium-user", 1, "user")])
+                self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
+                command.downgrade(config, "0003_memory_ingestion")
+                self.assertNotIn("role", {column["name"] for column in inspect(connection).get_columns("users")})
+                self.assertEqual(connection.execute(text("SELECT count(*) FROM users")).scalar_one(), 2)
         finally:
             engine.dispose()
 

@@ -46,12 +46,20 @@ class MessageRole(str, enum.Enum):
     CHARACTER = "CHARACTER"
 
 
+class UserRole(str, enum.Enum):
+    USER = "user"
+    ADMIN = "admin"
+
+
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (CheckConstraint("role IN ('user', 'admin')", name="ck_users_role"),)
     id = Column(String, primary_key=True, default=gen_uuid)
     email = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
     is_premium = Column(Boolean, default=False, nullable=False)
+    # Permission role is independent of the existing premium product tier.
+    role = Column(String(16), default=UserRole.USER.value, server_default=text("'user'"), nullable=False)
     created_at = Column(DateTime, default=utcnow)
 
     characters = relationship("Character", back_populates="user", cascade="all, delete-orphan")

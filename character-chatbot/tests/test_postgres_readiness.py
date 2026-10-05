@@ -81,7 +81,7 @@ class UsageLockingTests(unittest.TestCase):
         query = db.query.return_value
         filtered = query.filter.return_value
         locked = filtered.with_for_update.return_value
-        locked.first.return_value = SimpleNamespace(is_premium=False)
+        locked.first.return_value = SimpleNamespace(is_premium=False, role="user")
 
         session_context = Mock()
         session_context.__enter__ = Mock(return_value=db)

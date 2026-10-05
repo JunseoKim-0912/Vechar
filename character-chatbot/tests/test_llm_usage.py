@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+import jwt
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -19,9 +20,9 @@ from app import llm, llm_usage
 from app.llm_config import model_for_task
 from app.llm_usage import _estimated_cost
 from app.database import Base
-from app.auth import get_current_user_id
+from app.auth import JWT_ALGORITHM, JWT_SECRET, get_current_user_id, issue_token
 from app.database import get_db
-from app.models import Character, Conversation, LLMUsage, User
+from app.models import Character, Conversation, LLMUsage, User, UserRole
 from app.schemas import CharacterProfileData, WorldProfileData
 from app.tier_limits import TIER_LIMITS
 
@@ -34,10 +35,12 @@ class LLMUsageTests(unittest.TestCase):
         with Session(self.engine) as db:
             user = User(email="free@example.invalid", password_hash="unused")
             premium = User(email="premium@example.invalid", password_hash="unused", is_premium=True)
-            db.add_all([user, premium])
+            admin = User(email="admin@example.invalid", password_hash="unused", role=UserRole.ADMIN.value)
+            db.add_all([user, premium, admin])
             db.commit()
             self.free_id = user.id
             self.premium_id = premium.id
+            self.admin_id = admin.id
 
     def tearDown(self):
         self.engine.dispose()
@@ -113,6 +116,59 @@ class LLMUsageTests(unittest.TestCase):
         self.assertEqual(TIER_LIMITS["free"]["max_llm_cost_usd_per_month"], Decimal("20.00"))
         self.assertEqual(TIER_LIMITS["premium"]["max_llm_cost_usd_per_day"], Decimal("5.00"))
         self.assertEqual(TIER_LIMITS["premium"]["max_llm_cost_usd_per_month"], Decimal("100.00"))
+
+    def test_admin_bypasses_daily_rejection_but_records_reservation_and_actual_usage(self):
+        self._prior_usage(self.admin_id, Decimal("1.50"))
+        client = self._client(input_tokens=10, output_tokens=4)
+        self.assertEqual(self._call(self.admin_id, client), "OK")
+        client.responses.input_tokens.count.assert_called_once()
+        client.responses.create.assert_called_once()
+        with Session(self.engine) as db:
+            rows = db.query(LLMUsage).filter(LLMUsage.user_id == self.admin_id).all()
+            self.assertEqual(len(rows), 2)
+            actual = next(row for row in rows if row.request_type == "chat" and row.input_tokens == 10)
+            self.assertEqual((actual.status, actual.input_tokens, actual.output_tokens, actual.total_tokens),
+                             ("completed", 10, 4, 14))
+            self.assertEqual(actual.reserved_total_tokens, 30)
+            self.assertEqual(actual.model, "gpt-6-luna")
+            self.assertEqual(actual.estimated_cost_usd, Decimal("0.00000300"))
+
+    def test_admin_bypasses_monthly_rejection_without_changing_premium_tier(self):
+        from datetime import datetime as RealDateTime
+
+        fixed_now = RealDateTime(2026, 10, 15, 12, tzinfo=timezone.utc)
+        self._prior_usage(self.admin_id, Decimal("21.00"),
+                          created_at=RealDateTime(2026, 10, 2, tzinfo=timezone.utc))
+        with patch.object(llm_usage, "datetime", SimpleNamespace(now=lambda tz: fixed_now)):
+            usage_id = llm_usage.reserve_usage(self.engine, self.admin_id, "chat", "gpt-6-luna", 10, 20)
+        with Session(self.engine) as db:
+            admin = db.get(User, self.admin_id)
+            row = db.get(LLMUsage, usage_id)
+            self.assertFalse(admin.is_premium)
+            self.assertEqual((row.status, row.user_id, row.reserved_total_tokens),
+                             ("reserved", self.admin_id, 30))
+            self.assertGreater(row.estimated_cost_usd, 0)
+
+    def test_admin_preflight_skips_rejection_but_still_requires_model_pricing(self):
+        self._prior_usage(self.admin_id, Decimal("200.00"))
+        llm_usage.check_capacity(self.engine, self.admin_id, "gpt-6-luna", 20)
+        with self.assertRaises(ValueError):
+            llm_usage.check_capacity(self.engine, self.admin_id, "unpriced-model", 20)
+
+    def test_existing_jwt_cannot_cache_admin_role_after_db_promotion_or_demotion(self):
+        token = issue_token(self.free_id)
+        self.assertNotIn("role", jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM]))
+        self._prior_usage(self.free_id, Decimal("2.00"))
+        with Session(self.engine) as db:
+            db.get(User, self.free_id).role = UserRole.ADMIN.value
+            db.commit()
+        llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        with Session(self.engine) as db:
+            db.get(User, self.free_id).role = UserRole.USER.value
+            db.commit()
+        with self.assertRaises(HTTPException) as caught:
+            llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        self.assertEqual(caught.exception.detail["code"], "daily_limit_reached")
 
     def test_large_analysis_pricing_uses_central_long_context_rates(self):
         self.assertEqual(_estimated_cost("gpt-6.1-sol", 272_000, 0, 2_000), Decimal("0.564"))

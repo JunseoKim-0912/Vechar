@@ -4,8 +4,8 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from .models import User, ExportLog, ImportLog
 
-# 프리미엄은 지금은 상업적 판매용이 아니라, 본인 계정 전용 플래그입니다.
-# set_premium.py로 직접 DB에서 켜고 끕니다 (공개 API로 노출하지 않음).
+# Product-tier quotas remain controlled by is_premium; admin role only bypasses
+# the LLM USD rejection gate in llm_usage.py, never these product quotas.
 TIER_LIMITS = {
     "free": {
         "max_worlds": 2,

@@ -7,7 +7,7 @@ from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from .llm_config import MODEL_PRICES_USD_PER_MILLION
-from .models import LLMUsage, User
+from .models import LLMUsage, User, UserRole
 from .tier_limits import TIER_LIMITS
 
 
@@ -49,8 +49,9 @@ def check_capacity(bind, user_id: str, model: str, output_cap: int) -> None:
         user = db.query(User).filter(User.id == user_id).first()
         if user is None:
             raise HTTPException(status_code=401, detail={"code": "user_not_found"})
-        limits = TIER_LIMITS["premium" if user.is_premium else "free"]
-        _check_limits(db, user_id, limits, datetime.now(timezone.utc), minimum_reservation)
+        if user.role != UserRole.ADMIN.value:
+            limits = TIER_LIMITS["premium" if user.is_premium else "free"]
+            _check_limits(db, user_id, limits, datetime.now(timezone.utc), minimum_reservation)
 
 
 def reserve_usage(bind, user_id: str, request_type: str, model: str, input_tokens: int, output_cap: int) -> str:
@@ -69,10 +70,11 @@ def reserve_usage(bind, user_id: str, request_type: str, model: str, input_token
         if user is None:
             raise HTTPException(status_code=401, detail={"code": "user_not_found"})
 
-        limits = TIER_LIMITS["premium" if user.is_premium else "free"]
         now = datetime.now(timezone.utc)
         reservation = input_tokens + output_cap
-        _check_limits(db, user_id, limits, now, reserved_cost)
+        if user.role != UserRole.ADMIN.value:
+            limits = TIER_LIMITS["premium" if user.is_premium else "free"]
+            _check_limits(db, user_id, limits, now, reserved_cost)
 
         row = LLMUsage(
             user_id=user_id,

@@ -13,7 +13,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -38,17 +38,25 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
             with engine.connect() as connection:
                 config.attributes["connection"] = connection
                 command.upgrade(config, "0001_initial_schema")
-                with Session(bind=connection) as db:
-                    user = User(email=f"migration-{uuid4()}@example.invalid", password_hash="unused")
-                    db.add(user)
-                    db.commit()
-                    user_id = user.id
+                user_id = str(uuid4())
+                premium_id = str(uuid4())
+                for account_id, premium in ((user_id, False), (premium_id, True)):
+                    connection.execute(text(
+                        "INSERT INTO users (id, email, password_hash, is_premium) "
+                        "VALUES (:id, :email, :password_hash, :premium)"
+                    ), {"id": account_id, "email": f"migration-{account_id}@example.invalid",
+                        "password_hash": "unused", "premium": premium})
+                connection.commit()
                 command.upgrade(config, "head")
-                self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0003_memory_ingestion")
+                self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0004_user_roles")
                 self.assertTrue({"training_jobs", "training_job_chunks", "memory_ingestions",
                                  "memory_deletions"} <= set(inspect(connection).get_table_names()))
                 self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
                 self.assertEqual(connection.exec_driver_sql("SELECT count(*) FROM users WHERE id = %s", (user_id,)).scalar_one(), 1)
+                self.assertEqual(connection.execute(text("SELECT role FROM users WHERE id = :id"),
+                                                    {"id": user_id}).scalar_one(), "user")
+                self.assertEqual(connection.execute(text("SELECT is_premium, role FROM users WHERE id = :id"),
+                                                    {"id": premium_id}).one(), (True, "user"))
                 # Two independent PostgreSQL connections race for one chunk.
                 with Session(engine) as db:
                     target = Character(user_id=user_id, name="Concurrency fixture")
@@ -126,5 +134,7 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
                 self.assertFalse({"training_jobs", "training_job_chunks", "memory_ingestions",
                                   "memory_deletions"} & set(inspect(connection).get_table_names()))
                 self.assertEqual(connection.exec_driver_sql("SELECT count(*) FROM users WHERE id = %s", (user_id,)).scalar_one(), 1)
+                self.assertEqual(connection.execute(text("SELECT is_premium FROM users WHERE id = :id"),
+                                                    {"id": premium_id}).scalar_one(), True)
         finally:
             engine.dispose()
