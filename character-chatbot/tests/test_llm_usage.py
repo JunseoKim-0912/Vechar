@@ -17,6 +17,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app import llm, llm_usage
+from app.llm_failures import FailureKind, LLMResponseError
+from app.llm_operation import LLMOperation, llm_operation
 from app.llm_config import model_for_task
 from app.llm_usage import _estimated_cost
 from app.database import Base
@@ -175,7 +177,7 @@ class LLMUsageTests(unittest.TestCase):
         self.assertEqual(_estimated_cost("gpt-6.1-sol", 272_001, 0, 2_000), Decimal("1.118004"))
         with self.assertRaises(HTTPException) as caught:
             llm_usage.reserve_usage(self.engine, self.free_id, "character_extraction", "gpt-6.1-sol", 273_000, 20)
-        self.assertEqual(caught.exception.detail["code"], "daily_limit_reached")
+        self.assertEqual(caught.exception.detail["code"], "request_exceeds_remaining_daily_budget")
         usage_id = llm_usage.reserve_usage(
             self.engine, self.premium_id, "character_extraction", "gpt-6.1-sol", 273_000, 20
         )
@@ -257,6 +259,74 @@ class LLMUsageTests(unittest.TestCase):
                              ("character_extraction", "gpt-6.1-sol", 10, 2, 4, 14, "completed"))
             self.assertEqual(row.estimated_cost_usd, Decimal("0.00005620"))
 
+    def test_output_cap_incomplete_is_billed_and_diagnosed_without_raw_output(self):
+        client = self._client(input_tokens=14_000, output_tokens=8_000,
+                              output_text="", model="gpt-6.1-sol")
+        response = client.responses.create.return_value
+        response.id = "resp_opaque_test"
+        response.status = "incomplete"
+        response.error = SimpleNamespace(code="output_limit", message="must not persist")
+        response.incomplete_details = SimpleNamespace(reason="max_output_tokens")
+        response.usage.input_tokens_details.cached_tokens = 2_000
+        response.usage.output_tokens_details = SimpleNamespace(reasoning_tokens=7_700)
+        with self.assertRaises(LLMResponseError) as caught:
+            self._structured_call(client, output_cap=8_000)
+        self.assertEqual(caught.exception.kind, FailureKind.OUTPUT_LIMIT)
+        client.responses.create.assert_called_once()
+        with Session(self.engine) as db:
+            row = db.query(LLMUsage).one()
+            self.assertEqual((row.status, row.failure_class, row.provider_response_id,
+                              row.provider_status, row.provider_error_code, row.incomplete_reason),
+                             ("failed_response", "output_limit", "resp_opaque_test",
+                              "incomplete", "output_limit", "max_output_tokens"))
+            self.assertNotIn("must not persist", str(row.__dict__))
+            self.assertEqual((row.input_tokens, row.cached_input_tokens, row.output_tokens,
+                              row.reasoning_tokens), (14_000, 2_000, 8_000, 7_700))
+            self.assertEqual(row.estimated_cost_usd, Decimal("0.10420000"))
+            self.assertIsNotNone(row.reconciled_at)
+            self.assertIsNone(row.operation_key)
+
+    def test_same_logical_attempt_cannot_start_second_provider_call(self):
+        client = self._client()
+        operation = LLMOperation("job-opaque", "extract", 1, 2)
+        with llm_operation(operation):
+            self.assertEqual(self._call(self.free_id, client), "OK")
+            with self.assertRaises(llm_usage.DuplicateLLMOperation):
+                self._call(self.free_id, client)
+        client.responses.create.assert_called_once()
+        with Session(self.engine) as db:
+            rows = db.query(LLMUsage).all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].operation_key, operation.key("chat"))
+
+    def test_stale_reservation_is_flagged_without_erasing_unknown_cost(self):
+        first = llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20,
+                                        operation_key="training:stale:chunk:1:extract:1:chat")
+        with Session(self.engine) as db:
+            row = db.get(LLMUsage, first)
+            row.reservation_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+        llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20,
+                                operation_key="training:stale:chunk:1:extract:2:chat")
+        with Session(self.engine) as db:
+            old = db.get(LLMUsage, first)
+            self.assertEqual((old.status, old.estimated_cost_usd, old.reconciled_at),
+                             ("recovery_required", Decimal("0.00001100"), None))
+
+    def test_stale_reservation_remains_flagged_when_next_request_is_over_budget(self):
+        first = llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        with Session(self.engine) as db:
+            row = db.get(LLMUsage, first)
+            row.reservation_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+        with patch.dict(TIER_LIMITS["free"], {"max_llm_cost_usd_per_day": Decimal("0.00001100")}):
+            with self.assertRaises(HTTPException):
+                llm_usage.reserve_usage(self.engine, self.free_id, "chat", "gpt-6-luna", 10, 20)
+        with Session(self.engine) as db:
+            row = db.get(LLMUsage, first)
+            self.assertEqual((row.status, row.estimated_cost_usd),
+                             ("recovery_required", Decimal("0.00001100")))
+
     def test_structured_schema_mismatch_records_usage_as_failed_response(self):
         client = self._client(output_text='{"personality_summary": 123}', model="gpt-6.1-sol")
         with self.assertRaisesRegex(ValueError, "structured schema validation"):
@@ -264,7 +334,8 @@ class LLMUsageTests(unittest.TestCase):
         with Session(self.engine) as db:
             row = db.query(LLMUsage).one()
             self.assertEqual((row.status, row.error_type, row.total_tokens, row.budget_tokens),
-                             ("failed_response", "ValueError", 14, 14))
+                             ("failed_response", "LLMStructuredOutputError", 14, 14))
+            self.assertEqual(row.failure_class, "structured_output")
             self.assertEqual(row.estimated_cost_usd, Decimal("0.00006000"))
 
     def test_structured_missing_defaulted_field_is_not_silently_accepted(self):
@@ -403,7 +474,8 @@ class LLMUsageTests(unittest.TestCase):
                                 with self.assertRaises(HTTPException) as caught:
                                     llm_usage.reserve_usage(self.engine, user_id, "chat", "gpt-6-luna", 10, 20)
                                 self.assertEqual(caught.exception.status_code, 429)
-                                expected_code = "daily_limit_reached" if period == "day" else "monthly_limit_reached"
+                                expected_code = ("request_exceeds_remaining_daily_budget" if period == "day"
+                                                 else "request_exceeds_remaining_monthly_budget")
                                 self.assertEqual(caught.exception.detail["code"], expected_code)
 
     def test_daily_and_monthly_windows_reset_in_utc(self):
@@ -612,7 +684,7 @@ class LLMUsageTests(unittest.TestCase):
                 with patch.object(llm, "_get_client", return_value=client):
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         results = list(pool.map(lambda _: run(), range(2)))
-        self.assertCountEqual(results, ["OK", "daily_limit_reached"])
+        self.assertCountEqual(results, ["OK", "request_exceeds_remaining_daily_budget"])
         self.assertEqual(client.responses.create.call_count, 1)
 
     def test_http_route_preserves_clear_429_error(self):

@@ -260,7 +260,10 @@ class ImportLog(Base):
 
 class LLMUsage(Base):
     __tablename__ = "llm_usage"
-    __table_args__ = (Index("ix_llm_usage_user_created", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_llm_usage_user_created", "user_id", "created_at"),
+        Index("uq_llm_usage_operation_key", "operation_key", unique=True),
+    )
 
     id = Column(String, primary_key=True, default=gen_uuid)
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
@@ -277,6 +280,15 @@ class LLMUsage(Base):
     # Unknown billing outcomes retain the reservation to avoid understating the limit.
     estimated_cost_usd = Column(Numeric(12, 8), nullable=True)
     error_type = Column(String, nullable=True)
+    failure_class = Column(String(32), nullable=True)
+    operation_key = Column(String(200), nullable=True)
+    provider_response_id = Column(String(200), nullable=True)
+    provider_status = Column(String(32), nullable=True)
+    provider_error_code = Column(String(100), nullable=True)
+    incomplete_reason = Column(String(64), nullable=True)
+    reasoning_tokens = Column(Integer, nullable=True)
+    reservation_expires_at = Column(DateTime, nullable=True)
+    reconciled_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
 

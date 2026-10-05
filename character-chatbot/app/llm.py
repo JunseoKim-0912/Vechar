@@ -13,13 +13,16 @@ from .llm_config import (
     MAX_LLM_INPUT_BYTES, MAX_LLM_OUTPUT_TOKENS, MAX_TRAINING_INPUT_BYTES,
     MAX_TRAINING_INPUT_TOKENS, ModelTask, model_for_task,
 )
+from .llm_failures import FailureKind, LLMResponseError, LLMStructuredOutputError, classify_llm_failure
+from .llm_operation import current_operation
 from .llm_usage import check_capacity, record_failure, record_preflight_failure, record_response, reserve_usage
 
 StructuredResult = TypeVar("StructuredResult", bound=BaseModel)
 
 
-class LLMRefusalError(RuntimeError):
-    pass
+class LLMRefusalError(LLMResponseError):
+    def __init__(self):
+        super().__init__(FailureKind.REFUSAL, "Model refused structured output.")
 
 
 def _get_client() -> OpenAI:
@@ -129,7 +132,7 @@ def _require_output_fields(value: BaseModel) -> None:
     """Pydantic defaults are useful for stored data, but must not mask missing LLM fields."""
     missing = set(type(value).model_fields) - value.model_fields_set
     if missing:
-        raise ValueError(f"Structured response missing required fields: {', '.join(sorted(missing))}")
+        raise LLMStructuredOutputError(f"Structured response missing required fields: {', '.join(sorted(missing))}")
     for field_name in type(value).model_fields:
         field_value = getattr(value, field_name)
         if isinstance(field_value, BaseModel):
@@ -142,18 +145,21 @@ def _require_output_fields(value: BaseModel) -> None:
 
 def _parsed_output(response, response_model: type[StructuredResult]) -> StructuredResult:
     if response.status != "completed":
-        raise RuntimeError(f"Model response was not completed: {response.status}")
+        reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+        kind = (FailureKind.OUTPUT_LIMIT if response.status == "incomplete" and reason == "max_output_tokens"
+                else FailureKind.PROVIDER_TERMINAL)
+        raise LLMResponseError(kind, f"Model response was not completed: {response.status}")
     for output in response.output or []:
         if getattr(output, "type", None) == "message":
             for item in output.content or []:
                 if getattr(item, "type", None) == "refusal":
-                    raise LLMRefusalError("Model refused structured output.")
+                    raise LLMRefusalError()
     if not response.output_text:
-        raise ValueError("Model response contained no structured output.")
+        raise LLMStructuredOutputError("Model response contained no structured output.")
     try:
         parsed = response_model.model_validate_json(response.output_text, extra="forbid")
     except ValidationError as exc:
-        raise ValueError("Model response failed structured schema validation.") from exc
+        raise LLMStructuredOutputError("Model response failed structured schema validation.") from exc
     _require_output_fields(parsed)
     return parsed
 
@@ -193,7 +199,10 @@ def _generate_response(
     if input_policy == "training" and input_tokens + max_output_tokens > MAX_TRAINING_INPUT_TOKENS:
         record_preflight_failure(bind, user_id, request_type, model, "TrainingContextTooLarge")
         raise HTTPException(status_code=413, detail={"code": "training_context_too_large"})
-    usage_id = reserve_usage(bind, user_id, request_type, model, input_tokens, max_output_tokens)
+    operation = current_operation()
+    reservation_kwargs = {"operation_key": operation.key(request_type)} if operation else {}
+    usage_id = reserve_usage(bind, user_id, request_type, model, input_tokens,
+                             max_output_tokens, **reservation_kwargs)
 
     try:
         create_args = {
@@ -204,10 +213,13 @@ def _generate_response(
             create_args["text"] = text_config
         response = client.responses.create(**create_args)
     except APIStatusError as exc:
-        record_failure(bind, usage_id, type(exc).__name__, definitely_unbilled=400 <= exc.status_code < 500)
+        record_failure(bind, usage_id, type(exc).__name__,
+                       definitely_unbilled=400 <= exc.status_code < 500,
+                       failure_class=classify_llm_failure(exc).kind.value)
         raise
     except Exception as exc:
-        record_failure(bind, usage_id, type(exc).__name__)
+        record_failure(bind, usage_id, type(exc).__name__,
+                       failure_class=classify_llm_failure(exc).kind.value)
         raise
 
     try:
@@ -216,11 +228,18 @@ def _generate_response(
         if response_model:
             result = _parsed_output(response, response_model)
         else:
-            if response.status != "completed" or not response.output_text:
-                raise RuntimeError("Model response contained no completed text output.")
+            if response.status != "completed":
+                reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+                kind = (FailureKind.OUTPUT_LIMIT if response.status == "incomplete" and reason == "max_output_tokens"
+                        else FailureKind.PROVIDER_TERMINAL)
+                raise LLMResponseError(kind, "Model response contained no completed text output.")
+            if not response.output_text:
+                raise LLMResponseError(FailureKind.STRUCTURED_OUTPUT,
+                                       "Model response contained no completed text output.")
             result = response.output_text
     except Exception as exc:
-        record_response(bind, usage_id, response, output_error=type(exc).__name__ if response_model else None)
+        record_response(bind, usage_id, response, output_error=type(exc).__name__,
+                        failure_class=classify_llm_failure(exc).kind.value)
         raise
     record_response(bind, usage_id, response)
     return result

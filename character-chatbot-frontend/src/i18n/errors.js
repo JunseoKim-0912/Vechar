@@ -1,6 +1,11 @@
 const CODE_KEYS = {
   daily_limit_reached: "errors.dailyLimit",
   monthly_limit_reached: "errors.monthlyLimit",
+  request_exceeds_remaining_daily_budget: "errors.requestExceedsDailyBudget",
+  request_exceeds_remaining_monthly_budget: "errors.requestExceedsMonthlyBudget",
+  llm_output_limit: "errors.trainingOutputLimit",
+  llm_structured_output_invalid: "errors.trainingOutputInvalid",
+  llm_refusal: "errors.trainingOutputInvalid",
   user_not_found: "errors.unauthorized",
   training_source_missing: "errors.trainingSourceMissing",
   empty_training_file: "errors.emptyTrainingFile",

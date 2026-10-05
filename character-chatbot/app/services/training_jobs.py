@@ -10,6 +10,8 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
 from ..database import SessionLocal
+from ..llm_failures import classify_llm_failure
+from ..llm_operation import LLMOperation, llm_operation
 from ..models import (
     Character, IngestStatus, SourceType, TrainingJob, TrainingJobChunk,
     TrainingSource, World, WorldSource, WorldSourceType,
@@ -50,19 +52,6 @@ def _target_exists(db, job: TrainingJob) -> bool:
 
 def _lock_job(db, job_id: str) -> TrainingJob | None:
     return db.query(TrainingJob).filter(TrainingJob.id == job_id).with_for_update().first()
-
-
-def _terminal_error(exc: Exception) -> str | None:
-    if isinstance(exc, HTTPException):
-        code = exc.detail.get("code") if isinstance(exc.detail, dict) else None
-        if code in {"daily_limit_reached", "monthly_limit_reached"}:
-            return code
-        if 400 <= exc.status_code < 500 and exc.status_code != 429:
-            return code or "training_input_rejected"
-    provider_status = getattr(exc, "status_code", None)
-    if isinstance(provider_status, int) and 400 <= provider_status < 500 and provider_status != 429:
-        return "llm_request_rejected"
-    return None
 
 
 async def submit_job(
@@ -131,9 +120,9 @@ def _handle_stage_failure(job_id: str, token: str, exc: Exception) -> str:
         job = _lock_job(db, job_id)
         if not job or job.lease_token != token or JobStatus(job.status) in TERMINAL_JOBS:
             return "done"
-        code = _terminal_error(exc)
-        if code or job.attempt_count >= MAX_STAGE_ATTEMPTS:
-            fail_job(job, code or "training_failed")
+        classification = classify_llm_failure(exc)
+        if not classification.retryable or job.attempt_count >= MAX_STAGE_ATTEMPTS:
+            fail_job(job, classification.code)
             job.completed_at = _now()
             for chunk in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job_id):
                 chunk.extraction_result = None
@@ -144,8 +133,8 @@ def _handle_stage_failure(job_id: str, token: str, exc: Exception) -> str:
             outcome = "retry"
         attempt, status = job.attempt_count, job.status
         db.commit()
-    logger.warning("training stage failed job_id=%s attempt=%s status=%s error_type=%s",
-                   job_id, attempt, status, type(exc).__name__)
+    logger.warning("training stage failed job_id=%s attempt=%s status=%s error_type=%s retry_class=%s",
+                   job_id, attempt, status, type(exc).__name__, classification.kind.value)
     return outcome
 
 
@@ -249,11 +238,11 @@ def _handle_chunk_failure(job_id: str, chunk_id: str, token: str, exc: Exception
                                                    TrainingJobChunk.job_id == job_id).first()
         if not job or not chunk or chunk.lease_token != token or JobStatus(job.status) in TERMINAL_JOBS:
             return "done"
-        code = _terminal_error(exc)
-        if code or chunk.attempt_count >= MAX_CHUNK_ATTEMPTS:
+        classification = classify_llm_failure(exc)
+        if not classification.retryable or chunk.attempt_count >= MAX_CHUNK_ATTEMPTS:
             chunk.status = ChunkStatus.FAILED.value
-            chunk.error_code = code or "chunk_failed"
-            fail_job(job, code or "chunk_failed")
+            chunk.error_code = classification.code
+            fail_job(job, classification.code)
             job.completed_at = _now()
             for item in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job_id):
                 item.extraction_result = None
@@ -266,8 +255,9 @@ def _handle_chunk_failure(job_id: str, chunk_id: str, token: str, exc: Exception
             outcome = "retry"
         db.commit()
         attempt, status = chunk.attempt_count, chunk.status
-    logger.warning("training chunk failed job_id=%s chunk_id=%s attempt=%d status=%s error_type=%s",
-                   job_id, chunk_id, attempt, status, type(exc).__name__)
+    logger.warning("training chunk failed job_id=%s chunk_id=%s attempt=%d status=%s error_type=%s "
+                   "retry_class=%s", job_id, chunk_id, attempt, status, type(exc).__name__,
+                   classification.kind.value)
     return outcome
 
 
@@ -312,22 +302,23 @@ async def process_chunk(job_id: str, chunk_id: str, queue: TrainingQueue) -> str
             if not job or not chunk or job.source_text is None or not _target_exists(db, job):
                 raise RuntimeError("Training target/source unavailable")
             plan = _chunk_as_value(job, chunk)
-            if job.target_type == "character":
-                character = db.get(Character, job.target_id)
-                existing = get_profile(db, job.target_id)
-                canonical = CharacterProfileData.model_validate(existing.data) if existing else None
-                extracted = extract_profile_from_text(
-                    db, job.user_id, plan.text, SourceType(job.training_source_type),
-                    character.name, canonical, chunk=None if job.direct_mode else plan,
-                )
-            else:
-                existing = get_world_profile(db, job.target_id)
-                canonical = WorldProfileData.model_validate(existing.data) if existing else None
-                extracted = extract_world_profile_from_text(
-                    db, job.user_id, plan.text, WorldSourceType(job.training_source_type),
-                    job.series_name, job.episode_number, canonical,
-                    chunk=None if job.direct_mode else plan,
-                )
+            with llm_operation(LLMOperation(job.id, "extract", chunk.attempt_count, chunk.chunk_index)):
+                if job.target_type == "character":
+                    character = db.get(Character, job.target_id)
+                    existing = get_profile(db, job.target_id)
+                    canonical = CharacterProfileData.model_validate(existing.data) if existing else None
+                    extracted = extract_profile_from_text(
+                        db, job.user_id, plan.text, SourceType(job.training_source_type),
+                        character.name, canonical, chunk=None if job.direct_mode else plan,
+                    )
+                else:
+                    existing = get_world_profile(db, job.target_id)
+                    canonical = WorldProfileData.model_validate(existing.data) if existing else None
+                    extracted = extract_world_profile_from_text(
+                        db, job.user_id, plan.text, WorldSourceType(job.training_source_type),
+                        job.series_name, job.episode_number, canonical,
+                        chunk=None if job.direct_mode else plan,
+                    )
             extraction_result = extracted.model_dump()
         with SessionLocal() as db:
             job = _lock_job(db, job_id)
@@ -408,37 +399,38 @@ async def process_finalize(job_id: str) -> str:
             ).all()
             if len(chunks) != job.total_chunks or any(c.extraction_result is None for c in chunks):
                 raise RuntimeError("Incomplete extraction evidence")
-            if job.target_type == "character":
-                source = TrainingSource(
-                    id=job.id, character_id=job.target_id, source_type=SourceType(job.training_source_type),
-                    raw_text=job.source_text, char_count=job.source_char_count, status=IngestStatus.PENDING,
-                )
-                existing = get_profile(db, job.target_id)
-                canonical = CharacterProfileData.model_validate(existing.data) if existing else None
-                evidence = [ChunkEvidence(_chunk_as_value(job, c), CharacterProfileData.model_validate(c.extraction_result))
-                            for c in chunks]
-                run = ExtractionRun(
-                    "direct" if job.direct_mode else "chunked", job.source_tokens,
-                    [] if job.direct_mode else evidence,
-                    evidence[0].extracted if job.direct_mode else None,
-                )
-                finalize_character_run(db, job.user_id, source, canonical, run, commit=False)
-            else:
-                source = WorldSource(
-                    id=job.id, world_id=job.target_id, source_type=WorldSourceType(job.training_source_type),
-                    series_name=job.series_name, episode_number=job.episode_number,
-                    raw_text=job.source_text, char_count=job.source_char_count, status=IngestStatus.PENDING,
-                )
-                existing = get_world_profile(db, job.target_id)
-                canonical = WorldProfileData.model_validate(existing.data) if existing else None
-                evidence = [ChunkEvidence(_chunk_as_value(job, c), WorldProfileData.model_validate(c.extraction_result))
-                            for c in chunks]
-                run = ExtractionRun(
-                    "direct" if job.direct_mode else "chunked", job.source_tokens,
-                    [] if job.direct_mode else evidence,
-                    evidence[0].extracted if job.direct_mode else None,
-                )
-                finalize_world_run(db, job.user_id, source, canonical, run, commit=False)
+            with llm_operation(LLMOperation(job.id, "finalize", job.attempt_count)):
+                if job.target_type == "character":
+                    source = TrainingSource(
+                        id=job.id, character_id=job.target_id, source_type=SourceType(job.training_source_type),
+                        raw_text=job.source_text, char_count=job.source_char_count, status=IngestStatus.PENDING,
+                    )
+                    existing = get_profile(db, job.target_id)
+                    canonical = CharacterProfileData.model_validate(existing.data) if existing else None
+                    evidence = [ChunkEvidence(_chunk_as_value(job, c), CharacterProfileData.model_validate(c.extraction_result))
+                                for c in chunks]
+                    run = ExtractionRun(
+                        "direct" if job.direct_mode else "chunked", job.source_tokens,
+                        [] if job.direct_mode else evidence,
+                        evidence[0].extracted if job.direct_mode else None,
+                    )
+                    finalize_character_run(db, job.user_id, source, canonical, run, commit=False)
+                else:
+                    source = WorldSource(
+                        id=job.id, world_id=job.target_id, source_type=WorldSourceType(job.training_source_type),
+                        series_name=job.series_name, episode_number=job.episode_number,
+                        raw_text=job.source_text, char_count=job.source_char_count, status=IngestStatus.PENDING,
+                    )
+                    existing = get_world_profile(db, job.target_id)
+                    canonical = WorldProfileData.model_validate(existing.data) if existing else None
+                    evidence = [ChunkEvidence(_chunk_as_value(job, c), WorldProfileData.model_validate(c.extraction_result))
+                                for c in chunks]
+                    run = ExtractionRun(
+                        "direct" if job.direct_mode else "chunked", job.source_tokens,
+                        [] if job.direct_mode else evidence,
+                        evidence[0].extracted if job.direct_mode else None,
+                    )
+                    finalize_world_run(db, job.user_id, source, canonical, run, commit=False)
             # Fence the final write against cancellation and expired workers.
             locked = _lock_job(db, job_id)
             if not locked or locked.lease_token != token or JobStatus(locked.status) != JobStatus.SYNTHESIZING:

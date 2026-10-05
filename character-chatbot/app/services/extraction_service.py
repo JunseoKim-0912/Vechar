@@ -58,7 +58,12 @@ def extract_profile_from_text(
         f"Chunk {chunk.index}/{chunk.total}; source order {chunk.core_start}-{chunk.core_end}; "
         f"approximate tokens {chunk.token_start}-{chunk.token_end}; "
         f"leading overlap {chunk.overlap_tokens} tokens. "
-        "Overlapping text is context, not a second occurrence of the event.\n\n"
+        "Overlapping text is context, not a second occurrence of the event. "
+        "This is intermediate evidence, not a final exhaustive profile. Summarize rather than quote: "
+        "at most 12 distinct background facts, 8 relationships, and 4 representative sample dialogues. "
+        "Keep every materially distinct chronological event, including flashbacks and death, but merge "
+        "repeated descriptions of the same event and make each event summary concise. Do not omit a "
+        "material event merely to meet an item count. Leave do_not_do empty unless explicitly stated.\n\n"
         if chunk else ""
     )
 

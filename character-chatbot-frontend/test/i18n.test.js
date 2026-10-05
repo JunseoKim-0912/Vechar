@@ -37,6 +37,11 @@ test("common API failures use localized stable mappings", () => {
   const ko = (key, values) => translate("ko", key, values);
   assert.equal(localizeError({ code: "daily_limit_reached" }, en), translations.en.errors.dailyLimit);
   assert.equal(localizeError({ code: "monthly_limit_reached" }, ko), translations.ko.errors.monthlyLimit);
+  assert.equal(localizeError({ code: "request_exceeds_remaining_daily_budget" }, en),
+    translations.en.errors.requestExceedsDailyBudget);
+  assert.equal(localizeError({ code: "request_exceeds_remaining_monthly_budget" }, ko),
+    translations.ko.errors.requestExceedsMonthlyBudget);
+  assert.equal(localizeError({ code: "llm_output_limit" }, en), translations.en.errors.trainingOutputLimit);
   assert.equal(localizeError({ status: 401 }, en), translations.en.errors.unauthorized);
   assert.equal(localizeError({ status: 403 }, ko), translations.ko.errors.forbidden);
   assert.equal(localizeError({ status: 404 }, ko), translations.ko.errors.notFound);

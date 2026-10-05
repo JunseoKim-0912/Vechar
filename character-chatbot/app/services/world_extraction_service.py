@@ -52,7 +52,11 @@ def extract_world_profile_from_text(
         f"Chunk {chunk.index}/{chunk.total}; source order {chunk.core_start}-{chunk.core_end}; "
         f"approximate tokens {chunk.token_start}-{chunk.token_end}; "
         f"leading overlap {chunk.overlap_tokens} tokens. "
-        "Overlapping text is context, not a second occurrence of the event.\n\n"
+        "Overlapping text is context, not a second occurrence of the event. "
+        "This is intermediate evidence, not a final exhaustive world profile. Prefer concise, "
+        "nonduplicate salient facts (roughly up to 20 key facts and 20 timeline notes per chunk), "
+        "without losing a materially distinct chronological event or series distinction. "
+        "List only named/relevant characters; do not repeat source passages.\n\n"
         if chunk else ""
     )
 

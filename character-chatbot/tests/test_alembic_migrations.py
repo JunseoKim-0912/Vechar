@@ -21,7 +21,7 @@ from app.main import app
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 INI_PATH = BACKEND_ROOT / "alembic.ini"
 INITIAL_REVISION = "0001_initial_schema"
-HEAD_REVISION = "0004_user_roles"
+HEAD_REVISION = "0005_llm_response_diagnostics"
 
 
 class AlembicFoundationTests(unittest.TestCase):
@@ -35,7 +35,8 @@ class AlembicFoundationTests(unittest.TestCase):
         self.assertIsNone(script.get_revision(INITIAL_REVISION).down_revision)
         self.assertEqual(script.get_revision("0002_training_jobs").down_revision, INITIAL_REVISION)
         self.assertEqual(script.get_revision("0003_memory_ingestion").down_revision, "0002_training_jobs")
-        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0003_memory_ingestion")
+        self.assertEqual(script.get_revision("0004_user_roles").down_revision, "0003_memory_ingestion")
+        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0004_user_roles")
         self.assertIsNone(config.get_main_option("sqlalchemy.url"))
         ini_text = INI_PATH.read_text(encoding="utf-8")
         self.assertNotIn("postgresql://", ini_text)
@@ -105,6 +106,38 @@ class AlembicFoundationTests(unittest.TestCase):
                 command.downgrade(config, "0003_memory_ingestion")
                 self.assertNotIn("role", {column["name"] for column in inspect(connection).get_columns("users")})
                 self.assertEqual(connection.execute(text("SELECT count(*) FROM users")).scalar_one(), 2)
+        finally:
+            engine.dispose()
+
+    def test_usage_diagnostics_upgrade_preserves_existing_cost_and_downgrades(self):
+        engine = create_engine("sqlite://")
+        try:
+            with engine.connect() as connection:
+                config = self.make_config()
+                config.attributes["connection"] = connection
+                command.upgrade(config, "0004_user_roles")
+                connection.execute(text(
+                    "INSERT INTO users (id, email, password_hash, is_premium) "
+                    "VALUES ('u', 'u@example.invalid', 'unused', 0)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO llm_usage (id, user_id, request_type, model, status, "
+                    "input_tokens, output_tokens, total_tokens, cached_input_tokens, "
+                    "reserved_total_tokens, budget_tokens, estimated_cost_usd, created_at) "
+                    "VALUES ('usage', 'u', 'chat', 'gpt-6-luna', 'completed', "
+                    "10, 4, 14, 0, 30, 14, 0.00000300, '2026-10-05 00:00:00')"
+                ))
+                connection.commit()
+                command.upgrade(config, HEAD_REVISION)
+                self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
+                self.assertEqual(connection.execute(text(
+                    "SELECT estimated_cost_usd, provider_response_id, operation_key "
+                    "FROM llm_usage WHERE id='usage'"
+                )).one(), (0.000003, None, None))
+                command.downgrade(config, "0004_user_roles")
+                self.assertEqual(connection.execute(text(
+                    "SELECT count(*) FROM llm_usage WHERE id='usage'"
+                )).scalar_one(), 1)
         finally:
             engine.dispose()
 

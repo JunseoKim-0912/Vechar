@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session
 
 from app.models import Character, Conversation, MemoryIngestion, Message, MessageRole, TrainingJob, TrainingJobChunk, User
 from app.database import Base
+from app.llm_failures import DuplicateLLMOperation
+from app import llm_usage
 from app.schemas import CharacterProfileData
 from app.services import memory_jobs, memory_service, training_jobs
 from app.services.training_queue import InMemoryTrainingQueue
@@ -48,7 +50,7 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
                         "password_hash": "unused", "premium": premium})
                 connection.commit()
                 command.upgrade(config, "head")
-                self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0004_user_roles")
+                self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0005_llm_response_diagnostics")
                 self.assertTrue({"training_jobs", "training_job_chunks", "memory_ingestions",
                                  "memory_deletions"} <= set(inspect(connection).get_table_names()))
                 self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
@@ -57,6 +59,21 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
                                                     {"id": user_id}).scalar_one(), "user")
                 self.assertEqual(connection.execute(text("SELECT is_premium, role FROM users WHERE id = :id"),
                                                     {"id": premium_id}).one(), (True, "user"))
+                operation_key = f"training:{user_id}:chunk:1:extract:1:character_extraction"
+                def reserve_once():
+                    try:
+                        return llm_usage.reserve_usage(engine, user_id, "character_extraction",
+                                                       "gpt-6.1-sol", 10, 20,
+                                                       operation_key=operation_key)
+                    except DuplicateLLMOperation:
+                        return "duplicate"
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    reservations = list(pool.map(lambda _: reserve_once(), range(2)))
+                self.assertEqual(reservations.count("duplicate"), 1)
+                self.assertEqual(connection.execute(text(
+                    "SELECT count(*) FROM llm_usage WHERE operation_key = :key"
+                ), {"key": operation_key}).scalar_one(), 1)
                 # Two independent PostgreSQL connections race for one chunk.
                 with Session(engine) as db:
                     target = Character(user_id=user_id, name="Concurrency fixture")

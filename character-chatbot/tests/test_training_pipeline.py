@@ -338,7 +338,7 @@ class TrainingPipelineTests(unittest.TestCase):
                  "max_llm_cost_usd_per_day": Decimal("0.09"),
                  "max_llm_cost_usd_per_month": Decimal("0.09"),
              }), patch.object(llm, "_get_client", return_value=client):
-            with self.assertRaisesRegex(Exception, "daily_limit_reached"):
+            with self.assertRaisesRegex(Exception, "request_exceeds_remaining_daily_budget"):
                 training_pipeline.train_character_source(
                     self.db, self.user_id, source, "Ari", extraction_service.extract_profile_from_text)
         self.assertEqual(client.responses.create.call_count, 1)

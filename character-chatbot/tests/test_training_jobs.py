@@ -5,12 +5,16 @@ import unittest
 from datetime import timedelta
 from unittest.mock import patch
 
+import httpx2
 from fastapi import HTTPException
+from openai import InternalServerError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
+from app.llm_failures import FailureKind, LLMResponseError, LLMStructuredOutputError
+from app.llm_operation import current_operation
 from app.models import Character, CharacterProfile, TrainingJob, TrainingJobChunk, TrainingSource, User, World, WorldProfile, WorldSource
 from app.schemas import CharacterProfileData, CharacterSynthesisResult, WorldProfileData
 from app.services import training_jobs, training_pipeline
@@ -109,7 +113,7 @@ class TrainingJobWorkerTests(unittest.TestCase):
     def test_transient_failure_retries_then_terminal_limit(self):
         job_id = self.submit()
         chunk_id = self.plan(job_id)[0]
-        with patch.object(training_jobs, "extract_profile_from_text", side_effect=RuntimeError("temporary")) as mock:
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=TimeoutError("temporary")) as mock:
             for attempt in range(MAX_CHUNK_ATTEMPTS):
                 result = self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue))
                 self.assertEqual(result, "retry" if attempt < MAX_CHUNK_ATTEMPTS - 1 else "done")
@@ -125,7 +129,7 @@ class TrainingJobWorkerTests(unittest.TestCase):
         job_id = self.submit()
         chunk_id = self.plan(job_id)[0]
         with patch.object(training_jobs, "extract_profile_from_text", side_effect=[
-            RuntimeError("temporary"), CharacterProfileData(personality_summary="recovered"),
+            TimeoutError("temporary"), CharacterProfileData(personality_summary="recovered"),
         ]) as mock:
             self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "retry")
             self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
@@ -144,6 +148,64 @@ class TrainingJobWorkerTests(unittest.TestCase):
             mock.assert_called_once()
         with self.sessions() as db:
             self.assertEqual(db.get(TrainingJob, job_id).error_code, "daily_limit_reached")
+
+    def test_next_call_exceeds_remaining_budget_is_terminal(self):
+        job_id = self.submit()
+        chunk_id = self.plan(job_id)[0]
+        budget = HTTPException(429, detail={"code": "request_exceeds_remaining_daily_budget"})
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=budget) as mock:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
+            mock.assert_called_once()
+        with self.sessions() as db:
+            self.assertEqual(db.get(TrainingJob, job_id).error_code,
+                             "request_exceeds_remaining_daily_budget")
+
+    def test_output_cap_and_schema_failures_never_blind_retry_in_any_source_language(self):
+        for source, error, expected in (
+            ("Bonjour. Il se souvient de son enfance.",
+             LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete"), "llm_output_limit"),
+            ("He recalls the old timeline.",
+             LLMStructuredOutputError("invalid schema"), "llm_structured_output_invalid"),
+        ):
+            with self.subTest(source=source[:8]):
+                job_id = self.submit(text=source)
+                chunk_id = self.plan(job_id)[0]
+                with patch.object(training_jobs, "extract_profile_from_text", side_effect=error) as mock:
+                    self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
+                    self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
+                    mock.assert_called_once()
+                with self.sessions() as db:
+                    self.assertEqual(db.get(TrainingJob, job_id).error_code, expected)
+                    self.assertEqual(db.get(TrainingJobChunk, chunk_id).attempt_count, 1)
+
+    def test_provider_503_retries_with_existing_attempt_cap(self):
+        response = httpx2.Response(503, request=httpx2.Request("POST", "https://example.invalid"))
+        error = InternalServerError("temporary", response=response, body=None)
+        job_id = self.submit()
+        chunk_id = self.plan(job_id)[0]
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=error) as mock:
+            for attempt in range(MAX_CHUNK_ATTEMPTS):
+                result = self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue))
+                self.assertEqual(result, "retry" if attempt < MAX_CHUNK_ATTEMPTS - 1 else "done")
+            self.assertEqual(mock.call_count, MAX_CHUNK_ATTEMPTS)
+
+    def test_duplicate_delivery_keeps_one_logical_attempt(self):
+        job_id = self.submit()
+        chunk_id = self.plan(job_id)[0]
+        contexts = []
+
+        def extract(*args, **kwargs):
+            contexts.append(current_operation())
+            return CharacterProfileData(personality_summary="once")
+
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=extract) as mock:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
+            mock.assert_called_once()
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual((contexts[0].job_id, contexts[0].chunk_index, contexts[0].attempt),
+                         (job_id, 1, 1))
 
     def test_delete_cancels_and_late_messages_do_not_recreate_target(self):
         job_id = self.submit()
@@ -192,7 +254,7 @@ class TrainingJobWorkerTests(unittest.TestCase):
         with patch.object(training_jobs, "extract_profile_from_text", return_value=CharacterProfileData(personality_summary="new")):
             for chunk_id in chunks:
                 self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue))
-        with patch.object(training_pipeline, "generate_structured", side_effect=RuntimeError("provider down")) as mock:
+        with patch.object(training_pipeline, "generate_structured", side_effect=TimeoutError("provider down")) as mock:
             self.assertEqual(self.run_async(training_jobs.process_finalize(job_id)), "retry")
             mock.assert_called_once()
         with self.sessions() as db:
