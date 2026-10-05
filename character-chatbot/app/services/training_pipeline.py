@@ -57,15 +57,30 @@ def _source_token_estimate(source: str, count_tokens: Callable[[str], int]) -> i
     return total
 
 
+def plan_training_source(
+    db: Session, user_id: str, raw_text: str, request_type: str, output_cap: int,
+) -> tuple[str, int, list[TrainingChunk], bool]:
+    """The same direct/chunk decision used by synchronous and queued training."""
+    normalized = normalize_training_text(raw_text)
+    count_tokens = make_training_text_counter(db, user_id, request_type, output_cap)
+    source_tokens = _source_token_estimate(normalized, count_tokens)
+    if source_tokens <= DIRECT_TRAINING_SOURCE_TOKENS:
+        return normalized, source_tokens, [TrainingChunk(
+            index=1, total=1, source_start=0, core_start=0, core_end=len(normalized),
+            token_start=0, token_end=source_tokens, overlap_tokens=0, text=normalized,
+        )], True
+    return normalized, source_tokens, build_training_chunks(normalized, count_tokens, source_tokens), False
+
+
 def _extract(
     db: Session, user_id: str, source_id: str, raw_text: str,
     request_type: str, output_cap: int,
     direct: Callable[[str], ProfileT], chunk_extract: Callable[[TrainingChunk], ProfileT],
 ) -> ExtractionRun[ProfileT]:
-    normalized = normalize_training_text(raw_text)
-    count_tokens = make_training_text_counter(db, user_id, request_type, output_cap)
-    source_tokens = _source_token_estimate(normalized, count_tokens)
-    if source_tokens <= DIRECT_TRAINING_SOURCE_TOKENS:
+    normalized, source_tokens, chunks, direct_mode = plan_training_source(
+        db, user_id, raw_text, request_type, output_cap,
+    )
+    if direct_mode:
         logger.info("training path=direct source_id=%s tokens=%d extraction_calls=1",
                     source_id, source_tokens)
         try:
@@ -77,7 +92,6 @@ def _extract(
         logger.info("training direct_extraction=succeeded source_id=%s", source_id)
         return ExtractionRun(path="direct", source_tokens=source_tokens, chunks=[], direct_result=result)
 
-    chunks = build_training_chunks(normalized, count_tokens, source_tokens)
     logger.info("training path=chunked source_id=%s tokens=%d chunk_count=%d minimum_calls=%d",
                 source_id, source_tokens, len(chunks), len(chunks) + 1)
     evidence: list[ChunkEvidence[ProfileT]] = []
@@ -144,6 +158,15 @@ def train_character_source(
             db, user_id, chunk.text, source.source_type, character_name, canonical, chunk=chunk,
         ),
     )
+    return finalize_character_run(db, user_id, source, canonical, run)
+
+
+def finalize_character_run(
+    db: Session, user_id: str, source: TrainingSource,
+    canonical: CharacterProfileData | None, run: ExtractionRun[CharacterProfileData],
+    *, commit: bool = True,
+):
+    """Synthesize stored extraction evidence and publish the canonical profile."""
     synthesized = None
     if run.path == "direct":
         extracted = run.direct_result
@@ -200,9 +223,10 @@ def train_character_source(
     try:
         updated = merge_training_source(
             db, user_id, source.character_id, extracted, source_id=source.id,
-            synthesized_persona=synthesized,
+            synthesized_persona=synthesized, commit=commit,
         )
-        db.commit()  # Also covers a no-change profile merge.
+        if commit:
+            db.commit()  # Also covers a no-change profile merge.
     except Exception as exc:
         logger.warning("training publish=failed source_id=%s kind=character error_type=%s",
                        source.id, type(exc).__name__)
@@ -228,6 +252,15 @@ def train_world_source(
             canonical, chunk=chunk,
         ),
     )
+    return finalize_world_run(db, user_id, source, canonical, run)
+
+
+def finalize_world_run(
+    db: Session, user_id: str, source: WorldSource,
+    canonical: WorldProfileData | None, run: ExtractionRun[WorldProfileData],
+    *, commit: bool = True,
+):
+    """Synthesize stored world evidence and publish the canonical profile."""
     synthesized = None
     if run.path == "direct":
         extracted = run.direct_result
@@ -275,8 +308,10 @@ def train_world_source(
     try:
         updated = merge_world_source(
             db, user_id, source.world_id, extracted, synthesized_summary=synthesized,
+            commit=commit,
         )
-        db.commit()
+        if commit:
+            db.commit()
     except Exception as exc:
         logger.warning("training publish=failed source_id=%s kind=world error_type=%s",
                        source.id, type(exc).__name__)

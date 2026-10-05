@@ -1,7 +1,7 @@
 import uuid
 import enum
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Text, Integer, Boolean, DateTime, ForeignKey, JSON, Numeric, Index
+from sqlalchemy import Column, String, Text, Integer, Boolean, DateTime, ForeignKey, JSON, Numeric, Index, CheckConstraint, UniqueConstraint, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -270,3 +270,83 @@ class LLMUsage(Base):
     estimated_cost_usd = Column(Numeric(12, 8), nullable=True)
     error_type = Column(String, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class TrainingJob(Base):
+    __tablename__ = "training_jobs"
+    __table_args__ = (
+        CheckConstraint("target_type IN ('character', 'world')", name="ck_training_job_target_type"),
+        CheckConstraint("source_type IN ('text', 'file')", name="ck_training_job_source_type"),
+        CheckConstraint(
+            "status IN ('queued', 'chunking', 'extracting', 'synthesizing', 'completed', 'failed', 'cancelled')",
+            name="ck_training_job_status",
+        ),
+        Index(
+            "uq_training_jobs_active_target", "user_id", "target_type", "target_id", unique=True,
+            postgresql_where=text("status IN ('queued', 'chunking', 'extracting', 'synthesizing')"),
+            sqlite_where=text("status IN ('queued', 'chunking', 'extracting', 'synthesizing')"),
+        ),
+        Index("ix_training_jobs_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    target_type = Column(String, nullable=False)
+    target_id = Column(String, nullable=False)
+    source_type = Column(String, nullable=False)
+    training_source_type = Column(String, nullable=False)
+    source_text = Column(Text, nullable=True)
+    source_hash = Column(String(64), nullable=False)
+    source_char_count = Column(Integer, nullable=False)
+    series_name = Column(String, nullable=True)
+    episode_number = Column(Integer, nullable=True)
+    status = Column(String, nullable=False, default="queued")
+    stage = Column(String, nullable=False, default="queued")
+    total_chunks = Column(Integer, nullable=False, default=0)
+    completed_chunks = Column(Integer, nullable=False, default=0)
+    progress = Column(Integer, nullable=False, default=0)
+    source_tokens = Column(Integer, nullable=True)
+    direct_mode = Column(Boolean, nullable=False, default=False)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    lease_token = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    error_code = Column(String, nullable=True)
+    error_message_safe = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    chunks = relationship("TrainingJobChunk", cascade="all, delete-orphan", back_populates="job")
+
+
+class TrainingJobChunk(Base):
+    __tablename__ = "training_job_chunks"
+    __table_args__ = (
+        UniqueConstraint("job_id", "chunk_index", name="uq_training_job_chunk_index"),
+        CheckConstraint("status IN ('queued', 'processing', 'completed', 'failed')", name="ck_training_job_chunk_status"),
+        Index("ix_training_job_chunks_job_status", "job_id", "status"),
+    )
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    job_id = Column(String, ForeignKey("training_jobs.id", ondelete="CASCADE"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    status = Column(String, nullable=False, default="queued")
+    source_start = Column(Integer, nullable=False)
+    core_start = Column(Integer, nullable=False)
+    core_end = Column(Integer, nullable=False)
+    token_start = Column(Integer, nullable=False)
+    token_end = Column(Integer, nullable=False)
+    token_count = Column(Integer, nullable=False)
+    overlap_tokens = Column(Integer, nullable=False, default=0)
+    extraction_result = Column(JSON, nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    lease_token = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    error_code = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    job = relationship("TrainingJob", back_populates="chunks")

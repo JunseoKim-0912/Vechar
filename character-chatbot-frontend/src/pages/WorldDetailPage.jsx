@@ -4,6 +4,7 @@ import { api, downloadJSON } from "../api";
 import { useLocale } from "../context/LocaleContext";
 import { localizeError } from "../i18n/errors";
 import { trainingRequestBody } from "../trainingSource";
+import { startTrainingJobPolling, trainingProgress } from "../trainingJobs";
 
 export default function WorldDetailPage() {
   const { t } = useLocale();
@@ -21,6 +22,8 @@ export default function WorldDetailPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
   const [uploadFailed, setUploadFailed] = useState(false);
+  const [jobId, setJobId] = useState(null);
+  const [jobProgress, setJobProgress] = useState(null);
 
   const [editOp, setEditOp] = useState("add");
   const [editInstruction, setEditInstruction] = useState("");
@@ -47,24 +50,48 @@ export default function WorldDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  useEffect(() => {
+    if (!jobId) return undefined;
+    return startTrainingJobPolling({
+      api, jobId,
+      onUpdate: (job) => {
+        setUploadMessage(trainingProgress(job, t));
+        setJobProgress(job.progress);
+      },
+      onComplete: () => {
+        setUploading(false);
+        setJobId(null);
+        setUploadMessage(t("common.trained"));
+        void load();
+      },
+      onFailure: (job) => {
+        setUploading(false);
+        setJobId(null);
+        setUploadFailed(true);
+        setUploadMessage(`${t("training.failed")}: ${localizeError({ code: job.error_code }, t, "training")}`);
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, id, t]);
+
   async function handleUpload(e) {
     e.preventDefault();
     setUploading(true);
     setUploadMessage("");
     setUploadFailed(false);
+    setJobProgress(null);
     try {
       const body = await trainingRequestBody({ sourceType, seriesName, episodeNumber, text, file });
-      await api.post(`/worlds/${id}/sources`, body);
-      setUploadMessage(t("common.trained"));
+      const job = await api.post(`/worlds/${id}/sources`, body);
+      setJobId(job.job_id);
+      setUploadMessage(t("training.preparing"));
       setText("");
       setFile(null);
       if (fileInput.current) fileInput.current.value = "";
-      await load();
     } catch (err) {
+      setUploading(false);
       setUploadFailed(true);
       setUploadMessage(`${t("common.failed")}: ${localizeError(err, t, "training")}`);
-    } finally {
-      setUploading(false);
     }
   }
 
@@ -257,6 +284,7 @@ export default function WorldDetailPage() {
           {uploadMessage && (
             <p className={uploadFailed ? "form-error" : "form-success"}>{uploadMessage}</p>
           )}
+          {jobProgress !== null && <progress value={jobProgress} max="100" aria-label={t("training.progress")} />}
           <button type="submit" disabled={uploading || (!file && !text.trim())}>
             {uploading ? t("common.training") : t("common.upload")}
           </button>

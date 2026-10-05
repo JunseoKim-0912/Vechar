@@ -18,7 +18,8 @@ def get_profile(db: Session, character_id: str) -> CharacterProfile | None:
 
 
 def _snapshot_and_save(
-    db: Session, character_id: str, next_data: CharacterProfileData, reason: ChangeReason
+    db: Session, character_id: str, next_data: CharacterProfileData, reason: ChangeReason,
+    *, commit: bool = True,
 ) -> CharacterProfile:
     if next_data.timeline:
         ordered = reconcile_timeline([], next_data.timeline)
@@ -41,8 +42,11 @@ def _snapshot_and_save(
     if existing is None:
         profile = CharacterProfile(character_id=character_id, data=next_data.model_dump(), version=1)
         db.add(profile)
-        db.commit()
-        db.refresh(profile)
+        if commit:
+            db.commit()
+            db.refresh(profile)
+        else:
+            db.flush()
         return profile
     # 내용이 실질적으로 안 바뀌었으면 버전을 올리지 않고 그대로 반환 (히스토리 오염 방지)
     if CharacterProfileData.model_validate(existing.data) == next_data:
@@ -58,8 +62,11 @@ def _snapshot_and_save(
     )
     existing.data = next_data.model_dump()
     existing.version += 1
-    db.commit()
-    db.refresh(existing)
+    if commit:
+        db.commit()
+        db.refresh(existing)
+    else:
+        db.flush()
     return existing
 
 
@@ -95,6 +102,7 @@ def merge_training_source(
     db: Session, user_id: str, character_id: str, newly_extracted: CharacterProfileData,
     source_id: str | None = None,
     synthesized_persona: CharacterSynthesisResult | None = None,
+    *, commit: bool = True,
 ) -> CharacterProfile:
     """새 TrainingSource가 추출된 뒤 호출됩니다 (extraction_service.py 참고)."""
     existing_row = get_profile(db, character_id)
@@ -133,14 +141,14 @@ def merge_training_source(
                 "speech_style": persona.speech_style,
             }
         )
-        return _snapshot_and_save(db, character_id, initial, ChangeReason.TRAINING_INGEST)
+        return _snapshot_and_save(db, character_id, initial, ChangeReason.TRAINING_INGEST, commit=commit)
 
     # An out-of-order prequel or post-death source adds historical evidence, not a new persona.
     if (existing_data.chat_reference_point and reference
             and existing_data.chat_reference_point.event_key == reference.event_key
             and newly_extracted.timeline
             and all(event.event_key != reference.event_key for event in newly_extracted.timeline)):
-        return _snapshot_and_save(db, character_id, merged_arrays_only, ChangeReason.TRAINING_INGEST)
+        return _snapshot_and_save(db, character_id, merged_arrays_only, ChangeReason.TRAINING_INGEST, commit=commit)
 
     # 두 번째 소스부터는 기존 요약과 새 요약을 자연스럽게 통합하도록 LLM에 위임합니다.
     synthesized = synthesized_persona or generate_structured(
@@ -181,7 +189,7 @@ def merge_training_source(
             "speech_style": synthesized.speech_style or existing_data.speech_style,
         }
     )
-    return _snapshot_and_save(db, character_id, final_data, ChangeReason.TRAINING_INGEST)
+    return _snapshot_and_save(db, character_id, final_data, ChangeReason.TRAINING_INGEST, commit=commit)
 
 
 CORRECTION_SYSTEM_PROMPT = """당신은 캐릭터 프로필 편집자입니다. 사용자가 대화 중 캐릭터가 자신이 생각하는 모습과 다르다고 느껴서

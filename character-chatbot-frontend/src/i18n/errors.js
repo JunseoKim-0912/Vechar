@@ -10,6 +10,12 @@ const CODE_KEYS = {
   malformed_training_request: "errors.malformedTrainingRequest",
   training_context_too_large: "errors.trainingContextTooLarge",
   llm_input_too_large: "errors.trainingContextTooLarge",
+  training_queue_unavailable: "errors.server",
+  training_failed: "errors.server",
+  chunk_failed: "errors.server",
+  synthesis_failed: "errors.server",
+  planning_failed: "errors.server",
+  llm_request_rejected: "errors.server",
 };
 
 export function localizeError(error, t, context) {

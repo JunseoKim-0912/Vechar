@@ -9,10 +9,8 @@ from sqlalchemy.pool import StaticPool
 from app import llm, main
 from app.auth import issue_token
 from app.database import Base, get_db
-from app.models import Character, CharacterProfile, TrainingSource, User, World, WorldProfile, WorldSource
-from app.routers import characters_router, worlds_router
+from app.models import Character, TrainingJob, User, World
 from app.services import training_pipeline
-from app.schemas import CharacterProfileData, WorldProfileData
 from app import training_source
 
 
@@ -38,28 +36,15 @@ class TrainingUploadTests(unittest.TestCase):
         self.engine_patch.start()
         self.no_network = patch.object(llm, "_get_client", side_effect=AssertionError("Unexpected OpenAI call"))
         self.no_network.start()
-        # Upload validation tests isolate transport from the separately tested
-        # token-based pipeline; no provider token-count request is made here.
+        # Submission does not call the provider; worker tests cover processing.
         self.counter_patch = patch.object(training_pipeline, "make_training_text_counter",
                                           return_value=lambda text: 1)
         self.counter_patch.start()
-        self.character_extract = patch.object(
-            characters_router, "extract_profile_from_text",
-            return_value=CharacterProfileData(personality_summary="Mock profile"),
-        )
-        self.world_extract = patch.object(
-            worlds_router, "extract_world_profile_from_text",
-            return_value=WorldProfileData(world_summary="Mock world"),
-        )
-        self.character_mock = self.character_extract.start()
-        self.world_mock = self.world_extract.start()
         self.client = TestClient(main.app)
         self.client.__enter__()
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
-        self.world_extract.stop()
-        self.character_extract.stop()
         self.no_network.stop()
         self.counter_patch.stop()
         self.engine_patch.stop()
@@ -95,11 +80,10 @@ class TrainingUploadTests(unittest.TestCase):
                 with self.subTest(kind=kind, length=length):
                     path = self._target(kind)
                     response = self._post(path, text="가" * length)
-                    self.assertEqual(response.status_code, 201, response.text)
+                    self.assertEqual(response.status_code, 202, response.text)
                     with Session(self.engine) as db:
-                        model = TrainingSource if kind == "character" else WorldSource
-                        row = db.query(model).order_by(model.created_at.desc()).first()
-                        self.assertEqual((row.char_count, len(row.raw_text)), (length, length))
+                        row = db.get(TrainingJob, response.json()["job_id"])
+                        self.assertEqual((row.source_char_count, len(row.source_text)), (length, length))
 
     def test_txt_upload_accepts_300000_characters_and_takes_precedence_over_text(self):
         for kind in ("character", "world"):
@@ -107,9 +91,9 @@ class TrainingUploadTests(unittest.TestCase):
                 with self.subTest(kind=kind, bytes=len(content.encode("utf-8"))):
                     path = self._target(kind)
                     response = self._post(path, text="ignored", filename="source.TXT", content=content.encode("utf-8"))
-                    self.assertEqual(response.status_code, 201, response.text)
-                    extraction = self.character_mock if kind == "character" else self.world_mock
-                    self.assertEqual(extraction.call_args.args[2], content)
+                    self.assertEqual(response.status_code, 202, response.text)
+                    with Session(self.engine) as db:
+                        self.assertEqual(db.get(TrainingJob, response.json()["job_id"]).source_text, content)
 
     def test_legacy_multipart_text_accepts_300000_four_byte_characters(self):
         for kind in ("character", "world"):
@@ -122,7 +106,7 @@ class TrainingUploadTests(unittest.TestCase):
                     files={"text": (None, "😀" * 300_000)},
                     headers={"Authorization": f"Bearer {issue_token(self.owner_id)}"},
                 )
-                self.assertEqual(response.status_code, 201, response.text)
+                self.assertEqual(response.status_code, 202, response.text)
 
     def test_maximum_utf8_txt_remains_in_memory(self):
         path = self._target("character")
@@ -135,7 +119,7 @@ class TrainingUploadTests(unittest.TestCase):
 
         with patch.object(training_source, "read_training_source", side_effect=inspect_file):
             response = self._post(path, filename="large.txt", content=("😀" * 300_000).encode("utf-8"))
-        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(observed, [False])
 
     def test_invalid_sources_return_readable_codes_without_llm_calls(self):
@@ -151,9 +135,13 @@ class TrainingUploadTests(unittest.TestCase):
             for kwargs, code in cases:
                 with self.subTest(kind=kind, code=code):
                     path = self._target(kind)
+                    with Session(self.engine) as db:
+                        before = db.query(TrainingJob).count()
                     response = self._post(path, **kwargs)
                     self.assertEqual(response.status_code, 400, response.text)
                     self.assertEqual(response.json()["detail"]["code"], code)
+                    with Session(self.engine) as db:
+                        self.assertEqual(db.query(TrainingJob).count(), before)
 
     def test_malformed_multipart_and_auth_ownership_still_reject(self):
         for kind in ("character", "world"):
@@ -166,30 +154,38 @@ class TrainingUploadTests(unittest.TestCase):
                 self.assertEqual(malformed.status_code, 400)
                 self.assertEqual(malformed.json()["detail"]["code"], "malformed_training_request")
                 self.assertEqual(self.client.post(path, data={"source_type": "DESCRIPTION"}).status_code, 401)
+                with Session(self.engine) as db:
+                    before = db.query(TrainingJob).count()
                 self.assertEqual(
                     self._post(path, filename="source.txt", content=b"private", user_id=self.other_id).status_code,
                     404,
                 )
+                with Session(self.engine) as db:
+                    self.assertEqual(db.query(TrainingJob).count(), before)
 
-    def test_chunk_failure_marks_source_failed_without_partial_profile(self):
+    def test_duplicate_submission_returns_same_active_job_without_llm(self):
         for kind in ("character", "world"):
             with self.subTest(kind=kind):
                 path = self._target(kind)
-                router = characters_router if kind == "character" else worlds_router
-                name = "extract_profile_from_text" if kind == "character" else "extract_world_profile_from_text"
-                result = (CharacterProfileData(personality_summary="partial") if kind == "character"
-                          else WorldProfileData(world_summary="partial"))
-                with patch.object(training_pipeline, "make_training_text_counter", return_value=len), \
-                     patch.object(router, name, side_effect=[result, RuntimeError("chunk failed")]):
-                    response = self._post(path, text="A" * 35_000)
-                self.assertEqual(response.status_code, 500)
                 with Session(self.engine) as db:
-                    source_model = TrainingSource if kind == "character" else WorldSource
-                    source = db.query(source_model).order_by(source_model.created_at.desc()).first()
-                    self.assertEqual(source.status.value, "FAILED")
-                    self.assertIsNone(source.extracted_data)
-                    profile_model = CharacterProfile if kind == "character" else WorldProfile
-                    self.assertEqual(db.query(profile_model).count(), 0)
+                    before = db.query(TrainingJob).count()
+                response = self._post(path, text="first")
+                duplicate = self._post(path, text="second")
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(response.json()["job_id"], duplicate.json()["job_id"])
+                with Session(self.engine) as db:
+                    self.assertEqual(db.query(TrainingJob).count(), before + 1)
+
+    def test_job_status_is_private_and_excludes_source(self):
+        path = self._target("character")
+        job_id = self._post(path, text="private story").json()["job_id"]
+        headers = {"Authorization": f"Bearer {issue_token(self.owner_id)}"}
+        status = self.client.get(f"/training-jobs/{job_id}", headers=headers)
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["status"], "queued")
+        self.assertNotIn("source_text", status.json())
+        other = {"Authorization": f"Bearer {issue_token(self.other_id)}"}
+        self.assertEqual(self.client.get(f"/training-jobs/{job_id}", headers=other).status_code, 404)
 
 
 if __name__ == "__main__":

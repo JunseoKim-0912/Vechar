@@ -4,6 +4,7 @@ import { api, downloadJSON } from "../api";
 import { useLocale } from "../context/LocaleContext";
 import { localizeError } from "../i18n/errors";
 import { trainingRequestBody } from "../trainingSource";
+import { startTrainingJobPolling, trainingProgress } from "../trainingJobs";
 
 export default function CharacterDetailPage() {
   const { t } = useLocale();
@@ -19,6 +20,8 @@ export default function CharacterDetailPage() {
   const [training, setTraining] = useState(false);
   const [trainMessage, setTrainMessage] = useState("");
   const [trainFailed, setTrainFailed] = useState(false);
+  const [jobId, setJobId] = useState(null);
+  const [jobProgress, setJobProgress] = useState(null);
 
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
@@ -36,24 +39,48 @@ export default function CharacterDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  useEffect(() => {
+    if (!jobId) return undefined;
+    return startTrainingJobPolling({
+      api, jobId,
+      onUpdate: (job) => {
+        setTrainMessage(trainingProgress(job, t));
+        setJobProgress(job.progress);
+      },
+      onComplete: () => {
+        setTraining(false);
+        setJobId(null);
+        setTrainMessage(t("common.trained"));
+        void loadCharacter();
+      },
+      onFailure: (job) => {
+        setTraining(false);
+        setJobId(null);
+        setTrainFailed(true);
+        setTrainMessage(`${t("training.failed")}: ${localizeError({ code: job.error_code }, t, "training")}`);
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, id, t]);
+
   async function handleTrain(e) {
     e.preventDefault();
     setTraining(true);
     setTrainMessage("");
     setTrainFailed(false);
+    setJobProgress(null);
     try {
       const body = await trainingRequestBody({ sourceType, text, file });
-      await api.post(`/characters/${id}/training-sources`, body);
-      setTrainMessage(t("common.trained"));
+      const job = await api.post(`/characters/${id}/training-sources`, body);
+      setJobId(job.job_id);
+      setTrainMessage(t("training.preparing"));
       setText("");
       setFile(null);
       if (fileInput.current) fileInput.current.value = "";
-      await loadCharacter();
     } catch (err) {
+      setTraining(false);
       setTrainFailed(true);
       setTrainMessage(`${t("common.failed")}: ${localizeError(err, t, "training")}`);
-    } finally {
-      setTraining(false);
     }
   }
 
@@ -147,6 +174,7 @@ export default function CharacterDetailPage() {
           {trainMessage && (
             <p className={trainFailed ? "form-error" : "form-success"}>{trainMessage}</p>
           )}
+          {jobProgress !== null && <progress value={jobProgress} max="100" aria-label={t("training.progress")} />}
           <button type="submit" disabled={training || (!file && !text.trim())}>
             {training ? t("common.training") : t("characters.train")}
           </button>

@@ -75,6 +75,7 @@ async def parse_training_request(request: Request) -> dict:
             if any(not isinstance(value, str) for key, value in fields.items() if key != "file"):
                 raise _bad_source("malformed_training_request")
             fields["raw_text"] = await read_training_source(fields.get("text"), file)
+            fields["_source_type"] = "file" if file is not None else "text"
             return fields
         finally:
             await form.close()
@@ -84,4 +85,5 @@ async def parse_training_request(request: Request) -> dict:
     if not isinstance(fields.get("text"), (str, type(None))):
         raise _bad_source("malformed_training_request")
     fields["raw_text"] = await read_training_source(fields.get("text"), file)
+    fields["_source_type"] = "text"
     return fields

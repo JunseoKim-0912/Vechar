@@ -8,6 +8,7 @@ from .database import engine
 from .routers import auth_router, characters_router, upload_router
 from .routers import chat_router
 from .routers import worlds_router
+from .routers import training_jobs_router
 
 app = FastAPI(title="Character Chatbot API")
 
@@ -55,3 +56,4 @@ app.include_router(characters_router.router, prefix="/characters", tags=["charac
 app.include_router(upload_router.router, prefix="/upload", tags=["upload"])
 app.include_router(chat_router.router, prefix="/chat", tags=["chat"])
 app.include_router(worlds_router.router, prefix="/worlds", tags=["worlds"])
+app.include_router(training_jobs_router.router, prefix="/training-jobs", tags=["training-jobs"])

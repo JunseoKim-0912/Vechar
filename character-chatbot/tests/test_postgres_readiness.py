@@ -63,7 +63,7 @@ class PostgreSQLMetadataTests(unittest.TestCase):
             "users", "characters", "character_profiles", "character_profile_history",
             "training_sources", "worlds", "world_profiles", "world_profile_history",
             "world_sources", "conversations", "messages", "correction_logs",
-            "export_logs", "import_logs", "llm_usage",
+            "export_logs", "import_logs", "llm_usage", "training_jobs", "training_job_chunks",
         }
         self.assertEqual(set(Base.metadata.tables), expected_tables)
         compiled = "\n".join(statements)

@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user_id
-from ..models import Character, CharacterProfileHistory, TrainingSource, SourceType, IngestStatus, ChangeReason
+from ..models import Character, CharacterProfileHistory, SourceType, ChangeReason
 from ..schemas import (
     CharacterCreateRequest,
     CharacterRead,
@@ -14,9 +14,9 @@ from ..schemas import (
     CharacterImportRequest,
     RollbackRequest,
 )
-from ..services.extraction_service import extract_profile_from_text
 from ..services.character_profile_service import get_profile, set_initial_profile
-from ..services.training_pipeline import train_character_source
+from ..services.training_jobs import cancel_target_jobs, submit_job
+from ..services.training_queue import get_training_queue
 from ..training_source import parse_training_request
 from ..services.world_profile_service import get_or_create_default_world
 from ..services import memory_service
@@ -139,17 +139,19 @@ def delete_character(character_id: str, user_id: str = Depends(get_current_user_
             detail={"code": "memory_deletion_failed", "retryable": memory_deletion.retryable},
         )
 
+    cancel_target_jobs(db, user_id=user_id, target_type="character", target_id=character_id)
     db.delete(character)  # cascades to profile, training_sources, conversations, correction_logs (see models.py)
     db.commit()
     return None
 
 
-@router.post("/{character_id}/training-sources", status_code=201)
+@router.post("/{character_id}/training-sources", status_code=202)
 async def upload_training_source(
     character_id: str,
     request: Request,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
+    queue = Depends(get_training_queue),
 ):
     character = db.query(Character).filter(Character.id == character_id, Character.user_id == user_id).first()
     if not character:
@@ -162,39 +164,12 @@ async def upload_training_source(
         raise HTTPException(status_code=422, detail={"code": "malformed_training_request"}) from exc
     raw_text = fields["raw_text"]
 
-    source = TrainingSource(
-        character_id=character.id,
-        source_type=source_type,
+    job = await submit_job(
+        db, queue, user_id=user_id, target_type="character", target_id=character.id,
+        source_type=fields["_source_type"], training_source_type=source_type.value,
         raw_text=raw_text,
-        char_count=len(raw_text),
-        status=IngestStatus.PENDING,
     )
-    db.add(source)
-    db.commit()
-    db.refresh(source)
-
-    try:
-        updated_profile = train_character_source(
-            db, user_id, source, character.name, extract_profile_from_text,
-        )
-
-        return {
-            "source_id": source.id,
-            "status": source.status,
-            "profile": CharacterProfileRead.model_validate(updated_profile),
-        }
-    except HTTPException as e:
-        db.rollback()
-        source.status = IngestStatus.FAILED
-        source.error_message = str(e.detail)
-        db.commit()
-        raise
-    except Exception as e:
-        db.rollback()
-        source.status = IngestStatus.FAILED
-        source.error_message = str(e)
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"학습 데이터 처리 중 오류가 발생했습니다: {e}")
+    return {"job_id": job.id, "status": job.status}
 
 
 # --- Week 5: roll back a runaway merge or correction to a previous snapshot ---

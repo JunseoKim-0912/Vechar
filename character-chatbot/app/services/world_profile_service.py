@@ -42,15 +42,19 @@ def get_or_create_default_world(db: Session, user_id: str) -> World:
 
 
 def _snapshot_and_save(
-    db: Session, world_id: str, next_data: WorldProfileData, reason: ChangeReason
+    db: Session, world_id: str, next_data: WorldProfileData, reason: ChangeReason,
+    *, commit: bool = True,
 ) -> WorldProfile:
     existing = get_world_profile(db, world_id)
 
     if existing is None:
         profile = WorldProfile(world_id=world_id, data=next_data.model_dump(), version=1)
         db.add(profile)
-        db.commit()
-        db.refresh(profile)
+        if commit:
+            db.commit()
+            db.refresh(profile)
+        else:
+            db.flush()
         return profile
 
     # 내용이 실질적으로 안 바뀌었으면 버전을 올리지 않고 그대로 반환 (히스토리 오염 방지)
@@ -67,8 +71,11 @@ def _snapshot_and_save(
     )
     existing.data = next_data.model_dump()
     existing.version += 1
-    db.commit()
-    db.refresh(existing)
+    if commit:
+        db.commit()
+        db.refresh(existing)
+    else:
+        db.flush()
     return existing
 
 
@@ -128,6 +135,7 @@ The existing summary is canonical. Preserve its dominant language, register, and
 def merge_world_source(
     db: Session, user_id: str, world_id: str, newly_extracted: WorldProfileData,
     synthesized_summary: WorldSynthesisResult | None = None,
+    *, commit: bool = True,
 ) -> WorldProfile:
     """새 WorldSource(화/설명)가 추출된 뒤 호출됩니다."""
     existing_row = get_world_profile(db, world_id)
@@ -150,7 +158,7 @@ def merge_world_source(
         initial = merged_arrays_only.model_copy(update={
             "world_summary": synthesized_summary.world_summary if synthesized_summary else newly_extracted.world_summary,
         })
-        return _snapshot_and_save(db, world_id, initial, ChangeReason.TRAINING_INGEST)
+        return _snapshot_and_save(db, world_id, initial, ChangeReason.TRAINING_INGEST, commit=commit)
 
     synthesized = synthesized_summary or generate_structured(
         db=db,
@@ -177,7 +185,7 @@ def merge_world_source(
     final_data = merged_arrays_only.model_copy(
         update={"world_summary": synthesized.world_summary or existing_data.world_summary}
     )
-    return _snapshot_and_save(db, world_id, final_data, ChangeReason.TRAINING_INGEST)
+    return _snapshot_and_save(db, world_id, final_data, ChangeReason.TRAINING_INGEST, commit=commit)
 
 WORLD_EDIT_SYSTEM_PROMPTS = {
     "add": """당신은 세계관 편집자입니다. 사용자가 세계관에 새 정보를 "추가"하라고 요청했습니다.

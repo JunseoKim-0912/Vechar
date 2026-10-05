@@ -16,8 +16,8 @@ from ..schemas import (
     WorldExportData,
     WorldImportRequest,
 )
-from ..services.world_extraction_service import extract_world_profile_from_text
-from ..services.training_pipeline import train_world_source
+from ..services.training_jobs import cancel_target_jobs, submit_job
+from ..services.training_queue import get_training_queue
 from ..services.world_profile_service import (
     get_world_profile,
     apply_world_edit,
@@ -125,17 +125,19 @@ def delete_world(world_id: str, user_id: str = Depends(get_current_user_id), db:
 
     # cascades to profile/history/sources (models.py). Characters linked to this
     # world are NOT deleted — their world_id just becomes NULL (ondelete="SET NULL").
+    cancel_target_jobs(db, user_id=user_id, target_type="world", target_id=world_id)
     db.delete(world)
     db.commit()
     return None
 
 
-@router.post("/{world_id}/sources", status_code=201)
+@router.post("/{world_id}/sources", status_code=202)
 async def upload_world_source(
     world_id: str,
     request: Request,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
+    queue = Depends(get_training_queue),
 ):
     world = db.query(World).filter(World.id == world_id, World.user_id == user_id).first()
     if not world:
@@ -152,39 +154,12 @@ async def upload_world_source(
         raise HTTPException(status_code=422, detail={"code": "malformed_training_request"}) from exc
     raw_text = fields["raw_text"]
 
-    source = WorldSource(
-        world_id=world.id,
-        source_type=source_type,
-        series_name=series_name,
-        episode_number=episode_number,
-        raw_text=raw_text,
-        char_count=len(raw_text),
-        status=IngestStatus.PENDING,
+    job = await submit_job(
+        db, queue, user_id=user_id, target_type="world", target_id=world.id,
+        source_type=fields["_source_type"], training_source_type=source_type.value,
+        raw_text=raw_text, series_name=series_name, episode_number=episode_number,
     )
-    db.add(source)
-    db.commit()
-    db.refresh(source)
-
-    try:
-        updated_profile = train_world_source(db, user_id, source, extract_world_profile_from_text)
-
-        return {
-            "source_id": source.id,
-            "status": source.status,
-            "profile": WorldProfileRead.model_validate(updated_profile),
-        }
-    except HTTPException as e:
-        db.rollback()
-        source.status = IngestStatus.FAILED
-        source.error_message = str(e.detail)
-        db.commit()
-        raise
-    except Exception as e:
-        db.rollback()
-        source.status = IngestStatus.FAILED
-        source.error_message = str(e)
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"세계관 학습 중 오류가 발생했습니다: {e}")
+    return {"job_id": job.id, "status": job.status}
 
 
 @router.get("/{world_id}/summary")

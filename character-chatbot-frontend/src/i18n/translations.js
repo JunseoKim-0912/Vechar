@@ -42,6 +42,8 @@ export const translations = {
     training: {
       file: "Upload .txt File", text: "Enter text directly (max 300,000 characters)",
       bilingualHelp: "You can provide source material in English, Korean, or a mix of both.",
+      preparing: "Preparing training…", extracting: "Analyzing source… {completed} / {total}",
+      synthesizing: "Combining profile…", failed: "Training failed", progress: "Training progress",
     },
     chat: {
       characterFallback: "Character", me: "You", system: "System", send: "Send",
@@ -103,6 +105,8 @@ export const translations = {
     training: {
       file: "파일 업로드 (.txt)", text: "텍스트 직접 입력 (최대 300,000자)",
       bilingualHelp: "영어, 한국어 또는 두 언어가 섞인 자료를 사용할 수 있습니다.",
+      preparing: "학습 준비 중…", extracting: "원문 분석 중… {completed} / {total}",
+      synthesizing: "프로필 통합 중…", failed: "학습 실패", progress: "학습 진행률",
     },
     chat: {
       characterFallback: "캐릭터", me: "나", system: "시스템", send: "보내기",
