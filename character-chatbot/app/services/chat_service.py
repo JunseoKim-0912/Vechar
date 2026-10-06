@@ -1,8 +1,12 @@
 from datetime import datetime, timezone
+from decimal import Decimal
+from uuid import uuid4
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from ..models import Character, Message, MessageRole, CorrectionLog
+from ..models import Character, Message, MessageRole, CorrectionLog, LLMUsage
 from ..llm import generate_text, make_chat_input_counter
+from ..llm_config import model_for_task
+from ..llm_operation import LLMOperation, llm_operation
 from ..chat_context_config import ROLEPLAY_MAX_TOKENS
 from ..schemas import CharacterProfileData, WorldProfileData
 from .character_profile_service import get_profile, apply_user_correction
@@ -13,7 +17,10 @@ from .training_queue import MEMORY_INGEST_TOPIC
 from .world_profile_service import get_world_profile
 from ..tier_limits import correction_quota_message
 from ..ownership import get_owned_world
-from .chat_latency import stage
+from .chat_latency import set_safe_metadata, stage
+from .chat_language import response_language
+from .conversation_loop_guard import is_obvious_loop
+from .response_quality import explicit_repetition_request, select_quality_response
 
 CORRECTION_PREFIX = "/수정"
 
@@ -111,24 +118,56 @@ def send_message(
             character.name, profile_data, world_data, correction_prefix=CORRECTION_PREFIX, locale=locale,
             current_message=user_message, recent_messages=[(m.role, m.content) for m in history],
         )
+    language = response_language(user_message, [(m.role, m.content) for m in history], locale)
+    set_safe_metadata(conversation_type="user_character", response_language=language,
+                      conversation_id=conversation_id)
+    counter = make_chat_input_counter(db, user_id, ROLEPLAY_MAX_TOKENS)
+    prior_history = [(m.role, m.content) for m in history]
     with stage("prompt_builder"):
         budget = select_chat_context(
             instructions,
-            [(m.role, m.content) for m in history],
+            prior_history,
             user_message,
             memories=[candidate.content for candidate in memory_result.candidates],
-            count_input_tokens=make_chat_input_counter(db, user_id, ROLEPLAY_MAX_TOKENS),
+            count_input_tokens=counter,
         )
 
-    reply_text = generate_text(
-        db=db,
-        user_id=user_id,
-        request_type="chat",
-        task="chat",
-        instructions=instructions,
-        input_messages=budget.input_messages,
-        max_output_tokens=ROLEPLAY_MAX_TOKENS,
+    token = str(uuid4())
+
+    def generate(attempt: int, instruction_text: str, input_messages: list[dict]) -> str:
+        operation = LLMOperation(job_id=conversation_id, stage="reply", attempt=attempt,
+                                 chunk_key=token, operation_type="user_chat")
+        with llm_operation(operation):
+            return generate_text(
+                db=db, user_id=user_id, request_type="chat", task="chat",
+                instructions=instruction_text, input_messages=input_messages,
+                max_output_tokens=ROLEPLAY_MAX_TOKENS,
+            )
+
+    first_response = generate(1, instructions, budget.input_messages)
+    same_speaker_recent = [m.content for m in history if m.role == MessageRole.CHARACTER][-5:]
+    previous_user = [m.content for m in history if m.role == MessageRole.USER][-5:]
+    allow_repetition = explicit_repetition_request(user_message) or any(
+        user_message.strip().casefold() == previous.strip().casefold()
+        or is_obvious_loop(user_message, [previous]) for previous in previous_user
     )
+
+    def retry(correction: str) -> str:
+        retry_instructions = instructions + correction
+        with stage("prompt_builder"):
+            retry_budget = select_chat_context(
+                retry_instructions, prior_history, user_message,
+                memories=[candidate.content for candidate in memory_result.candidates],
+                count_input_tokens=counter,
+            )
+        return generate(2, retry_instructions, retry_budget.input_messages)
+
+    outcome = select_quality_response(
+        first_response, same_speaker_recent=same_speaker_recent,
+        language=language, allow_repetition=allow_repetition, retry=retry,
+    )
+    set_safe_metadata(**outcome.safe_metadata("user_character", language))
+    reply_text = outcome.text
 
     assistant_turn = Message(conversation_id=conversation_id, role=MessageRole.CHARACTER, content=reply_text)
     db.add(assistant_turn)
@@ -139,5 +178,17 @@ def send_message(
     )
     db.commit()
     memory_jobs.publish_safe(MEMORY_INGEST_TOPIC, ingestion.id if ingestion else None)
+
+    keys = [LLMOperation(job_id=conversation_id, stage="reply", attempt=attempt,
+                         chunk_key=token, operation_type="user_chat").key("chat")
+            for attempt in range(1, outcome.retry_count + 2)]
+    usage = db.query(LLMUsage).filter(LLMUsage.user_id == user_id,
+                                     LLMUsage.operation_key.in_(keys)).all()
+    set_safe_metadata(model=model_for_task("chat"),
+                      input_tokens=sum(row.input_tokens for row in usage),
+                      output_tokens=sum(row.output_tokens for row in usage),
+                      estimated_cost_usd=str(sum(
+                          (row.estimated_cost_usd or Decimal(0) for row in usage), Decimal(0),
+                      )))
 
     return {"role": "CHARACTER", "content": reply_text}

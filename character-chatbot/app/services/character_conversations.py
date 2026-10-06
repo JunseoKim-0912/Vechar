@@ -19,7 +19,7 @@ from .chat_actions import normalize_assistant_actions
 from .chat_context_budget import select_chat_context
 from .chat_latency import set_safe_metadata, stage
 from .chat_prompt_builder import build_chat_instructions
-from .conversation_loop_guard import is_obvious_loop
+from .response_quality import select_quality_response
 from .world_profile_service import get_world_profile
 
 ROOM_KIND = "character_pair"
@@ -160,10 +160,12 @@ def _usage_totals(db: Session, room_id: str, token: str, attempts: int, user_id:
 
 def _room_instructions(speaker_name: str, profile: CharacterProfileData,
                        world: WorldProfileData | None, other_name: str,
-                       language: str, last_message: str) -> str:
+                       language: str, last_message: str,
+                       history: list[tuple[MessageRole, str]]) -> str:
     base = build_chat_instructions(
         speaker_name, profile, world, correction_prefix="/수정",
         current_message=last_message,
+        recent_messages=history,
         response_language_override="Korean" if language == "ko" else "English",
     )
     return base + f"""
@@ -175,11 +177,11 @@ are not your canon. This is a crossover conversation, not a merge of either stor
 Use only your own canonical state, what the other character actually said in this room, and shared
 room-visible context. The room response language is {'Korean' if language == 'ko' else 'English'}.
 
-Progress the conversation naturally. In each turn, add a new canon-consistent perspective, reaction,
-consequence, related question, or relationship development. If a topic has been covered for several
-turns, move to a related new angle. Do not repeat a recently answered question, restate the same fact,
-paraphrase the last two to four turns, or repeat an introductory/emotional observation. A relevant
-callback much later is fine; do not jump to a random topic just to be novel. Keep action blocks concise."""
+Each response should change the conversational state in some meaningful way when possible: follow through
+on an action, resolve or deepen an open thread, introduce a consequence, change the relationship, or take
+a related new perspective. A wish already expressed, advice already given, and a limitation already named
+are established; do not paraphrase them as if new. The same canonical motif may recur only to make a new
+point. Preserve continuity and voice; do not jump to an unrelated topic just to be novel."""
 
 
 def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int) -> dict:
@@ -189,7 +191,6 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
                       loop_guard_triggered=False)
     with stage("session_lookup"):
         _claim_turn(db, room_id, user_id, expected_turn_index, token)
-    loop_triggered = False
     attempts = 0
     try:
         room = _owned_room(db, room_id, user_id)
@@ -216,12 +217,13 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
                 else (MessageRole.USER, f"{other_name} said: {normalize_assistant_actions(message.content)}")
                 for message in messages
             ]
-            recent_content = [message.content for message in messages[-4:]]
+            same_speaker_recent = [message.content for message in messages
+                                   if message.speaker_character_id == speaker_id][-5:]
             last_content = messages[-1].content if messages else ""
 
         with stage("canonical_state_reconstruction"):
             instructions = _room_instructions(speaker_name, profile, world, other_name,
-                                              room_language, last_content)
+                                              room_language, last_content, history)
         prompt_turn = f"It is {speaker_name}'s turn. Respond to {other_name} with one natural turn."
         with stage("prompt_builder"):
             counter = make_chat_input_counter(db, user_id, ROLEPLAY_MAX_TOKENS)
@@ -240,24 +242,26 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
                                      max_output_tokens=ROLEPLAY_MAX_TOKENS)
 
         attempts = 1
-        response = generate(1, instructions, budget.input_messages)
-        loop_triggered = is_obvious_loop(response, recent_content)
-        if loop_triggered:
-            set_safe_metadata(loop_guard_triggered=True, retry_count=1)
-            retry_instructions = instructions + (
-                "\nYour draft repeated a recent question, fact, or phrasing. Advance this same "
-                "conversation with a new canon-consistent angle or consequence. Do not restart it."
-            )
+        first_response = generate(1, instructions, budget.input_messages)
+
+        def retry(correction: str) -> str:
+            retry_instructions = instructions + correction
             with stage("prompt_builder"):
                 retry_budget = select_chat_context(retry_instructions, history, prompt_turn,
                                                    count_input_tokens=counter)
-            attempts = 2
-            try:
-                response = generate(2, retry_instructions, retry_budget.input_messages)
-            except Exception:
-                # The first completed result is a bounded fallback; do not
-                # strand the room because an optional quality retry failed.
-                attempts = 2
+            return generate(2, retry_instructions, retry_budget.input_messages)
+
+        outcome = select_quality_response(
+            first_response, same_speaker_recent=same_speaker_recent,
+            recent_visible=[message.content for message in messages[-4:]],
+            language="Korean" if room_language == "ko" else "English",
+            allow_repetition=False, retry=retry,
+        )
+        attempts = 1 + outcome.retry_count
+        set_safe_metadata(**outcome.safe_metadata("character_pair",
+                                                   "Korean" if room_language == "ko" else "English"),
+                          loop_guard_triggered=outcome.initial.semantic_loop_detected)
+        response = outcome.text
 
         db.add(Message(conversation_id=room_id, role=MessageRole.CHARACTER,
                        speaker_character_id=speaker_id, turn_index=expected_turn_index + 1,

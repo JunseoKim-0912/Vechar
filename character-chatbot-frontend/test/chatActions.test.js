@@ -39,3 +39,37 @@ test("assistant actions render as accessible, escaped semantic blocks", () => {
   assert.match(css, /overflow-wrap: anywhere/);
   assert.match(css, /@media \(max-width: 640px\)/);
 });
+
+test("historical internal marker, nesting and malformed closings render without raw syntax", () => {
+  for (const content of [
+    "Hello. [Character action: lowers gaze.] Goodbye.",
+    "Hello. <action><action>lowers gaze.</action></action> Goodbye.",
+    "Hello. <action>lowers gaze.</action Goodbye.",
+  ]) {
+    const html = renderToStaticMarkup(React.createElement(ChatMessageContent,
+      { role: "CHARACTER", content }));
+    assert.match(html, /class="chat-action"/);
+    assert.match(html, /class="chat-dialogue"/);
+    assert.doesNotMatch(html, /Character action:|&lt;action&gt;|&lt;\/action/);
+  }
+  assert.deepEqual(parseActionSegments("Hi <action>nods</action> bye <action>smiles</action>"), [
+    { type: "dialogue", text: "Hi " }, { type: "action", text: "nods" },
+    { type: "dialogue", text: " bye " }, { type: "action", text: "smiles" },
+  ]);
+});
+
+test("unsafe and incomplete markup stays escaped and cannot crash the renderer", () => {
+  const html = renderToStaticMarkup(React.createElement(ChatMessageContent, {
+    role: "CHARACTER", content: "Look <script>alert(1)</script> <act",
+  }));
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /&lt;act/);
+});
+
+test("both chat pages use one canonical action rendering component", () => {
+  const chat = readFileSync(new URL("../src/pages/ChatPage.jsx", import.meta.url), "utf8");
+  const room = readFileSync(new URL("../src/characterConversationUi.js", import.meta.url), "utf8");
+  assert.match(chat, /<ChatMessageContent role=\{m.role\} content=\{m.content\}/);
+  assert.match(room, /React\.createElement\(ChatMessageContent/);
+});

@@ -193,6 +193,33 @@ class CharacterConversationAPITests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.text)
         self.assertEqual(generation.call_count, 2)
 
+    def test_room_combines_style_and_language_repair_in_one_retry(self):
+        room = self.create_room(language="ko")
+        prior = [
+            (self.first_id, "참 답답하구나, 이 바보야."),
+            (self.second_id, "그렇다면 다른 길은 어때?"),
+            (self.first_id, "왜 그러니, 이 바보야."),
+            (self.second_id, "이제 직접 결정해 봐."),
+        ]
+        with Session(self.engine) as db:
+            for index, (speaker, content) in enumerate(prior, 1):
+                db.add(Message(conversation_id=room["id"], role=MessageRole.CHARACTER,
+                               speaker_character_id=speaker, turn_index=index, content=content))
+            db.query(Conversation).filter_by(id=room["id"]).update({"turn_index": 4})
+            db.commit()
+        with patch.object(rooms, "make_chat_input_counter", side_effect=fake_counter), \
+             patch.object(rooms, "generate_text", side_effect=[
+                 "이 바보야. This is a complete English sentence about the road ahead.",
+                 "[Character action: 나는 고개를 숙인다.] 이제 다른 길을 찾자.",
+             ]) as generation:
+            response = self.client.post(f"/character-conversations/{room['id']}/next",
+                                        headers=self.headers, json={"expected_turn_index": 4})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(generation.call_count, 2)
+        self.assertEqual(response.json()["room"]["turn_index"], 5)
+        self.assertEqual(response.json()["message"]["content"],
+                         "<action>고개를 숙인다.</action> 이제 다른 길을 찾자.")
+
     def test_loop_guard_conservative_progression_and_late_callback(self):
         self.assertTrue(is_obvious_loop("Tell me about your family?",
                                         ["Tell me about your family."]))

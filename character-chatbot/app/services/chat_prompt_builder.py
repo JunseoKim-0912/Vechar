@@ -8,6 +8,7 @@ from ..schemas import CharacterProfileData, WorldProfileData
 from .character_timeline import _terminal_evidence, derive_chat_reference, lived_events_before_reference
 from .chat_actions import normalize_assistant_actions
 from .chat_language import response_language
+from .conversation_loop_guard import derive_conversation_state
 
 
 def _temporal_context(profile: CharacterProfileData, current_message: str) -> str:
@@ -99,6 +100,7 @@ def build_chat_instructions(
 세계관 사실: {world_facts}"""
 
     language = response_language_override or response_language(current_message, recent_messages, locale)
+    progression_state = derive_conversation_state([content for _, content in recent_messages]).prompt_block() if recent_messages else ""
 
     return f"""당신은 지금부터 "{character_name}"라는 캐릭터를 연기합니다.
 
@@ -125,7 +127,18 @@ def build_chat_instructions(
 7. Dialogue is ordinary text. Put only concise physical actions, body language, facial expressions, gestures,
    meaningful non-verbal reactions, or immediate environmental interactions in <action>...</action> blocks.
    Do not use action blocks for exposition, world lore, or lengthy narrator prose. Do not invent an action
-   for every turn. Never output arbitrary HTML; <action> is the only semantic marker."""
+   for every turn. Never output arbitrary HTML; <action> is the only semantic marker.
+8. Preserve canonical identity and timeline first. In conversation, treat established points as settled unless
+   challenged. Do not merely restate what you already said or repeat advice already given. Advance an open
+   thread, add a consequence, resolve or deepen a question, or move naturally to a related perspective when
+   the current point is exhausted. A relevant callback later is welcome; random novelty is not.
+9. Keep character voice without reusing the same distinctive catchphrase, insult, address, opening, ending,
+   rhetorical template, or gesture in every recent reply. A signature motif may recur only when it adds a
+   new meaning rather than making the same point again.
+10. Use the chosen response language throughout dialogue, follow-up questions, and actions. Proper nouns
+    and brief quotations may retain their original spelling. Actions should be concise, subjectless when
+    natural, and describe an immediate physical gesture/reaction. Omit unnecessary 'I', '나는', '내가', and the
+    speaker name; do not use an action block for long narration.{progression_state}"""
 
 
 def build_chat_input(
