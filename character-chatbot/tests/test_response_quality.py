@@ -150,7 +150,6 @@ class ActionParserTests(unittest.TestCase):
         for raw, expected in (
             ("<action>나는 고개를 숙인다.</action>", "<action>고개를 숙인다.</action>"),
             ("<action>내가 창밖을 바라본다.</action>", "<action>창밖을 바라본다.</action>"),
-            ("<action>I look toward the window.</action>", "<action>Looks toward the window.</action>"),
         ):
             canonical, parsed = canonicalize_assistant_message(raw)
             self.assertEqual(canonical, expected)
@@ -159,6 +158,7 @@ class ActionParserTests(unittest.TestCase):
             "<action>나는 그가 고개를 숙이는 것을 본다.</action>",
             "<action>Gregor lowers his gaze.</action>",
             "<action>\"I look toward the window.\"</action>",
+            "<action>I look toward the window.</action>",
         ):
             canonical, parsed = canonicalize_assistant_message(raw)
             self.assertEqual(canonical, raw)

@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 
 from app.database import Base
 from app import models  # noqa: F401 - populate Base.metadata
@@ -21,7 +23,7 @@ from app.main import app
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 INI_PATH = BACKEND_ROOT / "alembic.ini"
 INITIAL_REVISION = "0001_initial_schema"
-HEAD_REVISION = "0007_character_conversations"
+HEAD_REVISION = "0008_conversation_runtime_state"
 
 
 class AlembicFoundationTests(unittest.TestCase):
@@ -38,7 +40,9 @@ class AlembicFoundationTests(unittest.TestCase):
         self.assertEqual(script.get_revision("0004_user_roles").down_revision, "0003_memory_ingestion")
         self.assertEqual(script.get_revision("0006_adaptive_training_chunks").down_revision,
                          "0005_llm_response_diagnostics")
-        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0006_adaptive_training_chunks")
+        self.assertEqual(script.get_revision("0007_character_conversations").down_revision,
+                         "0006_adaptive_training_chunks")
+        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0007_character_conversations")
         self.assertEqual(script.get_revision("0005_llm_response_diagnostics").down_revision, "0004_user_roles")
         self.assertIsNone(config.get_main_option("sqlalchemy.url"))
         ini_text = INI_PATH.read_text(encoding="utf-8")
@@ -109,6 +113,105 @@ class AlembicFoundationTests(unittest.TestCase):
                 command.downgrade(config, "0003_memory_ingestion")
                 self.assertNotIn("role", {column["name"] for column in inspect(connection).get_columns("users")})
                 self.assertEqual(connection.execute(text("SELECT count(*) FROM users")).scalar_one(), 2)
+        finally:
+            engine.dispose()
+
+    def test_runtime_state_upgrade_preserves_room_messages_and_round_trips(self):
+        engine = create_engine("sqlite://")
+        try:
+            with engine.connect() as connection:
+                config = self.make_config()
+                config.attributes["connection"] = connection
+                command.upgrade(config, "0007_character_conversations")
+                connection.execute(text(
+                    "INSERT INTO users (id, email, password_hash, is_premium) "
+                    "VALUES ('u', 'runtime@example.invalid', 'unused', 0)"
+                ))
+                connection.execute(text("INSERT INTO characters (id, user_id, name) VALUES ('a', 'u', 'A')"))
+                connection.execute(text("INSERT INTO characters (id, user_id, name) VALUES ('b', 'u', 'B')"))
+                connection.execute(text(
+                    "INSERT INTO conversations (id, character_id, secondary_character_id, user_id, kind, "
+                    "name, language, turn_index) VALUES ('room', 'a', 'b', 'u', 'character_pair', 'Old room', 'en', 1)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO messages (id, conversation_id, role, speaker_character_id, turn_index, content) "
+                    "VALUES ('m1', 'room', 'CHARACTER', 'a', 1, 'Existing turn')"
+                ))
+                connection.commit()
+                command.upgrade(config, HEAD_REVISION)
+                self.assertIn("runtime_state", {c["name"] for c in inspect(connection).get_columns("conversations")})
+                self.assertIsNone(connection.execute(text(
+                    "SELECT runtime_state FROM conversations WHERE id='room'"
+                )).scalar_one())
+                self.assertEqual(connection.execute(text(
+                    "SELECT content FROM messages WHERE id='m1'"
+                )).scalar_one(), "Existing turn")
+                command.downgrade(config, "0007_character_conversations")
+                self.assertNotIn("runtime_state", {c["name"] for c in inspect(connection).get_columns("conversations")})
+                self.assertEqual(connection.execute(text(
+                    "SELECT content FROM messages WHERE id='m1'"
+                )).scalar_one(), "Existing turn")
+                command.upgrade(config, HEAD_REVISION)
+                self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
+        finally:
+            engine.dispose()
+
+    def test_runtime_state_round_trip_on_disposable_postgres(self):
+        url = os.getenv("LOCAL_POSTGRES_RUNTIME_TEST_URL")
+        if not url:
+            self.skipTest("Disposable localhost runtime PostgreSQL URL not configured")
+        parsed = make_url(url)
+        if (parsed.get_backend_name() != "postgresql"
+                or parsed.host not in {"localhost", "127.0.0.1"}
+                or parsed.database != "vechar_runtime_test"):
+            self.fail("Runtime migration test accepts only localhost/vechar_runtime_test")
+        engine = create_engine(url)
+        try:
+            with engine.connect() as connection:
+                config = self.make_config()
+                config.attributes["connection"] = connection
+                command.upgrade(config, "0007_character_conversations")
+                connection.execute(text(
+                    "INSERT INTO users (id, email, password_hash, is_premium) "
+                    "VALUES ('runtime-user', 'runtime@example.invalid', 'unused', false)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO characters (id, user_id, name) VALUES "
+                    "('runtime-a', 'runtime-user', 'A'), ('runtime-b', 'runtime-user', 'B')"
+                ))
+                connection.execute(text(
+                    "INSERT INTO conversations (id, character_id, secondary_character_id, user_id, kind, "
+                    "name, language, turn_index) VALUES "
+                    "('runtime-room', 'runtime-a', 'runtime-b', 'runtime-user', "
+                    "'character_pair', 'Old room', 'en', 1)"
+                ))
+                connection.execute(text(
+                    "INSERT INTO messages (id, conversation_id, role, speaker_character_id, turn_index, content) "
+                    "VALUES ('runtime-message', 'runtime-room', 'CHARACTER', 'runtime-a', 1, 'Existing turn')"
+                ))
+                connection.commit()
+                command.upgrade(config, HEAD_REVISION)
+                self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
+                self.assertIsNone(connection.execute(text(
+                    "SELECT runtime_state FROM conversations WHERE id='runtime-room'"
+                )).scalar_one())
+                connection.execute(text(
+                    "UPDATE conversations SET runtime_state=:state WHERE id='runtime-room'"
+                ), {"state": '{"version":1,"open_threads":["reply"]}'})
+                connection.commit()
+                self.assertIsNotNone(connection.execute(text(
+                    "SELECT runtime_state FROM conversations WHERE id='runtime-room'"
+                )).scalar_one())
+                command.downgrade(config, "0007_character_conversations")
+                self.assertNotIn("runtime_state", {c["name"] for c in inspect(connection).get_columns("conversations")})
+                self.assertEqual(connection.execute(text(
+                    "SELECT content FROM messages WHERE id='runtime-message'"
+                )).scalar_one(), "Existing turn")
+                command.upgrade(config, HEAD_REVISION)
+                self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
+                self.assertEqual(connection.execute(text(
+                    "SELECT count(*) FROM messages WHERE id='runtime-message'"
+                )).scalar_one(), 1)
         finally:
             engine.dispose()
 

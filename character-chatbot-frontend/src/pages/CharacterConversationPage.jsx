@@ -55,6 +55,9 @@ export default function CharacterConversationPage() {
       if (failure.status === 409) {
         try { await refreshRoom(); } catch { /* Preserve the original conflict message. */ }
         setError(t("characterConversations.turnConflict"));
+      } else if (!failure.status || failure.status >= 500) {
+        try { await refreshRoom(); } catch { /* The retry remains available. */ }
+        setError(t("characterConversations.generationFailed"));
       } else {
         setError(localizeError(failure, t));
       }

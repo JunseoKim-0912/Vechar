@@ -1,6 +1,7 @@
 """Durable room and existing-chat regression tests; all provider calls are mocked."""
 
 import unittest
+from datetime import timedelta
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -12,11 +13,13 @@ from app.auth import issue_token
 from app.database import Base, get_db
 from app.main import app
 from app.models import (
-    Character, CharacterProfile, Conversation, MemoryIngestion, Message, MessageRole, User, World,
+    Character, CharacterProfile, Conversation, MemoryIngestion, Message, MessageRole, User, World, utcnow,
 )
+from app.llm_failures import LLMStructuredOutputError
 from app.schemas import CharacterProfileData, TimelineEvent, TimelineStateChanges
 from app.services import character_conversations as rooms, chat_service, memory_jobs, memory_service
 from app.services.conversation_loop_guard import is_obvious_loop
+from app.services.conversation_runtime import ChatTurnResult, TurnProgression, empty_turn
 
 
 def fake_counter(*_args, **_kwargs):
@@ -239,8 +242,8 @@ class CharacterConversationAPITests(unittest.TestCase):
              patch.object(rooms, "generate_text", side_effect=RuntimeError("mock failure")) as generation:
             failed = self.client.post(f"/character-conversations/{room['id']}/next",
                                       headers=self.headers, json={"expected_turn_index": 0})
-            self.assertEqual(failed.status_code, 500)
-            self.assertEqual(generation.call_count, 1)
+        self.assertEqual(failed.status_code, 503)
+        self.assertEqual(generation.call_count, 1)
         with Session(self.engine) as db:
             stored = db.get(Conversation, room["id"])
             self.assertEqual(stored.turn_index, 0)
@@ -255,6 +258,77 @@ class CharacterConversationAPITests(unittest.TestCase):
                                      headers=self.headers, json={"expected_turn_index": 0})
             self.assertEqual(stale.status_code, 409)
             self.assertEqual(generation.call_count, 1)
+
+    def test_structured_metadata_is_persisted_but_not_exposed_after_reentry(self):
+        room = self.create_room()
+        with Session(self.engine) as db:
+            db.query(Conversation).filter_by(id=room["id"]).update({"runtime_state": {
+                "version": 1, "last_message_id": None, "open_threads": ["should_gregor_call_grete"],
+            }})
+            db.commit()
+        first = ChatTurnResult(response="Gregor calls Grete. Will she answer?", progression=TurnProgression(
+            topic="grete", new_development="gregor_calls_grete",
+            resolved_thread="should_gregor_call_grete", opened_thread="does_grete_respond",
+            action_taken=None, advice_given=None, repeated_point=False,
+        ))
+        with patch.object(rooms, "make_chat_input_counter", side_effect=fake_counter), \
+             patch.object(rooms, "generate_text", side_effect=[first, empty_turn("She waits by the doorway.")]) as generation:
+            created = self.client.post(f"/character-conversations/{room['id']}/next",
+                                       headers=self.headers, json={"expected_turn_index": 0})
+            self.assertEqual(created.status_code, 200, created.text)
+            self.assertEqual(created.json()["message"]["content"], first.response)
+            self.assertNotIn("progression", created.text)
+            with Session(self.engine) as db:
+                stored = db.get(Conversation, room["id"]).runtime_state
+                self.assertEqual(stored["open_threads"], ["does_grete_respond"])
+                self.assertEqual(stored["resolved_threads"], ["should_gregor_call_grete"])
+            resumed = self.client.post(f"/character-conversations/{room['id']}/next",
+                                       headers=self.headers, json={"expected_turn_index": 1})
+            self.assertEqual(resumed.status_code, 200, resumed.text)
+            self.assertIn("does_grete_respond", generation.call_args_list[1].kwargs["instructions"])
+
+    def test_schema_failure_consumes_only_one_retry_and_releases_claim(self):
+        room = self.create_room()
+        with patch.object(rooms, "make_chat_input_counter", side_effect=fake_counter), \
+             patch.object(rooms, "generate_text", side_effect=[
+                 LLMStructuredOutputError("invalid"), empty_turn("A different path opens."),
+             ]) as generation:
+            recovered = self.client.post(f"/character-conversations/{room['id']}/next",
+                                         headers=self.headers, json={"expected_turn_index": 0})
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual(generation.call_count, 2)
+        failed_room = self.create_room()
+        with patch.object(rooms, "make_chat_input_counter", side_effect=fake_counter), \
+             patch.object(rooms, "generate_text", side_effect=LLMStructuredOutputError("invalid")) as generation:
+            failed = self.client.post(f"/character-conversations/{failed_room['id']}/next",
+                                      headers=self.headers, json={"expected_turn_index": 0})
+        self.assertEqual(failed.status_code, 503)
+        self.assertEqual(failed.json()["detail"]["code"], "room_generation_failed")
+        self.assertEqual(generation.call_count, 2)
+        with Session(self.engine) as db:
+            stored = db.get(Conversation, failed_room["id"])
+            self.assertEqual(stored.turn_index, 0)
+            self.assertIsNone(stored.generation_token)
+            self.assertEqual(db.query(Message).filter_by(conversation_id=failed_room["id"]).count(), 0)
+
+    def test_expired_claim_recovers_without_advance_or_phantom_message(self):
+        room = self.create_room()
+        with Session(self.engine) as db:
+            db.query(Conversation).filter_by(id=room["id"]).update({
+                "generation_token": "old-token", "generation_lease_expires_at": utcnow() - timedelta(seconds=1),
+            })
+            db.commit()
+        with patch.object(rooms, "make_chat_input_counter", side_effect=fake_counter), \
+             patch.object(rooms, "generate_text", return_value=empty_turn("A fresh turn.")) as generation:
+            result = self.client.post(f"/character-conversations/{room['id']}/next",
+                                      headers=self.headers, json={"expected_turn_index": 0})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(generation.call_count, 1)
+        with Session(self.engine) as db:
+            stored = db.get(Conversation, room["id"])
+            self.assertEqual(stored.turn_index, 1)
+            self.assertIsNone(stored.generation_token)
+            self.assertEqual(db.query(Message).filter_by(conversation_id=room["id"]).count(), 1)
 
     def test_character_deletion_cascades_room_and_messages(self):
         room = self.create_room()

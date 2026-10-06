@@ -1,6 +1,6 @@
 """Authenticated, owner-scoped two-character room API."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user_id
@@ -52,4 +52,10 @@ def delete_room(room_id: str, user_id: str = Depends(get_current_user_id), db: S
 @router.post("/{room_id}/next", response_model=CharacterConversationTurnRead)
 def next_turn(room_id: str, payload: CharacterConversationNextRequest,
               user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    return rooms.next_turn(db, room_id, user_id, payload.expected_turn_index)
+    try:
+        return rooms.next_turn(db, room_id, user_id, payload.expected_turn_index)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # No provider details or raw dialogue cross the API boundary.
+        raise HTTPException(status_code=503, detail={"code": "room_generation_failed"}) from exc

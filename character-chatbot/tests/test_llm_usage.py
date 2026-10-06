@@ -742,7 +742,13 @@ class LLMUsageTests(unittest.TestCase):
             db.add(conversation)
             db.commit()
             conversation_id = conversation.id
-        client = self._client()
+        client = self._client(output_text=json.dumps({
+            "response": "OK",
+            "progression": {"topic": "greeting", "new_development": None,
+                            "resolved_thread": None, "opened_thread": None,
+                            "action_taken": None, "advice_given": None,
+                            "repeated_point": False},
+        }))
 
         def test_db():
             with Session(self.engine) as db:

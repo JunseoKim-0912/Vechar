@@ -1,6 +1,6 @@
 """Durable two-character rooms sharing the existing Conversation/Message ledger."""
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -9,8 +9,9 @@ from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from ..chat_context_config import ROLEPLAY_MAX_TOKENS
-from ..llm import generate_text, make_chat_input_counter
+from ..llm import generate_chat_turn as generate_text, make_chat_input_counter
 from ..llm_config import model_for_task
+from ..llm_failures import LLMStructuredOutputError, classify_llm_failure
 from ..llm_operation import LLMOperation, llm_operation
 from ..models import Character, Conversation, LLMUsage, Message, MessageRole, utcnow
 from ..schemas import CharacterProfileData, WorldProfileData
@@ -20,6 +21,7 @@ from .chat_context_budget import select_chat_context
 from .chat_latency import set_safe_metadata, stage
 from .chat_prompt_builder import build_chat_instructions
 from .response_quality import select_quality_response
+from .conversation_runtime import ConversationRuntimeState, advance_runtime, turn_output_instructions
 from .world_profile_service import get_world_profile
 
 ROOM_KIND = "character_pair"
@@ -121,6 +123,15 @@ def delete_room(db: Session, room_id: str, user_id: str) -> None:
 
 def _claim_turn(db: Session, room_id: str, user_id: str, expected: int, token: str) -> None:
     now = utcnow()
+    prior = db.query(Conversation.generation_token, Conversation.generation_lease_expires_at).filter(
+        Conversation.id == room_id, Conversation.user_id == user_id,
+    ).first()
+    # The existing DateTime column is timezone-naive on SQLite/PostgreSQL even
+    # though utcnow() is aware. Interpret stored lease timestamps as UTC.
+    prior_expiry = prior.generation_lease_expires_at if prior else None
+    if prior_expiry is not None and prior_expiry.tzinfo is None:
+        prior_expiry = prior_expiry.replace(tzinfo=timezone.utc)
+    recovered = bool(prior and prior.generation_token and prior_expiry and prior_expiry < now)
     claimed = db.execute(update(Conversation).where(
         Conversation.id == room_id, Conversation.user_id == user_id,
         Conversation.kind == ROOM_KIND, Conversation.turn_index == expected,
@@ -131,6 +142,7 @@ def _claim_turn(db: Session, room_id: str, user_id: str, expected: int, token: s
     if claimed.rowcount != 1:
         _owned_room(db, room_id, user_id)
         raise HTTPException(status_code=409, detail={"code": "room_turn_stale_or_busy"})
+    set_safe_metadata(generation_claim_recovered=recovered)
 
 
 def _release_claim(db: Session, room_id: str, user_id: str, token: str) -> None:
@@ -161,7 +173,7 @@ def _usage_totals(db: Session, room_id: str, token: str, attempts: int, user_id:
 def _room_instructions(speaker_name: str, profile: CharacterProfileData,
                        world: WorldProfileData | None, other_name: str,
                        language: str, last_message: str,
-                       history: list[tuple[MessageRole, str]]) -> str:
+                       history: list[tuple[MessageRole, str]], runtime_block: str = "") -> str:
     base = build_chat_instructions(
         speaker_name, profile, world, correction_prefix="/수정",
         current_message=last_message,
@@ -181,7 +193,8 @@ Each response should change the conversational state in some meaningful way when
 on an action, resolve or deepen an open thread, introduce a consequence, change the relationship, or take
 a related new perspective. A wish already expressed, advice already given, and a limitation already named
 are established; do not paraphrase them as if new. The same canonical motif may recur only to make a new
-point. Preserve continuity and voice; do not jump to an unrelated topic just to be novel."""
+point. Preserve continuity and voice; do not jump to an unrelated topic just to be novel.
+{runtime_block}{turn_output_instructions()}"""
 
 
 def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int) -> dict:
@@ -220,10 +233,15 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
             same_speaker_recent = [message.content for message in messages
                                    if message.speaker_character_id == speaker_id][-5:]
             last_content = messages[-1].content if messages else ""
+            runtime = ConversationRuntimeState.from_storage(room.runtime_state, messages)
+            set_safe_metadata(conversation_runtime_version=runtime.version,
+                              open_thread_count=len(runtime.open_threads),
+                              resolved_thread_count=len(runtime.resolved_threads))
 
         with stage("canonical_state_reconstruction"):
             instructions = _room_instructions(speaker_name, profile, world, other_name,
-                                              room_language, last_content, history)
+                                              room_language, last_content, history,
+                                              runtime.prompt_block(speaker_id))
         prompt_turn = f"It is {speaker_name}'s turn. Respond to {other_name} with one natural turn."
         with stage("prompt_builder"):
             counter = make_chat_input_counter(db, user_id, ROLEPLAY_MAX_TOKENS)
@@ -232,19 +250,30 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
         # No room/profile read transaction remains open across network latency.
         db.rollback()
 
-        def generate(attempt: int, instruction_text: str, input_messages: list[dict]) -> str:
+        def generate(attempt: int, instruction_text: str, input_messages: list[dict]):
             operation = LLMOperation(job_id=room_id, stage="next", attempt=attempt,
                                      chunk_key=token, operation_type="character_room")
             with llm_operation(operation):
-                return generate_text(db=db, user_id=user_id, request_type=REQUEST_TYPE,
-                                     task="chat", instructions=instruction_text,
-                                     input_messages=input_messages,
-                                     max_output_tokens=ROLEPLAY_MAX_TOKENS)
+                try:
+                    return generate_text(db=db, user_id=user_id, request_type=REQUEST_TYPE,
+                                         task="chat", instructions=instruction_text,
+                                         input_messages=input_messages,
+                                         max_output_tokens=ROLEPLAY_MAX_TOKENS)
+                except Exception as exc:
+                    set_safe_metadata(provider_error_category=classify_llm_failure(exc).kind.value)
+                    raise
 
         attempts = 1
-        first_response = generate(1, instructions, budget.input_messages)
+        schema_retried = False
+        try:
+            first_response = generate(1, instructions, budget.input_messages)
+        except LLMStructuredOutputError:
+            schema_retried = True
+            attempts = 2
+            first_response = generate(2, instructions + "\nReturn the required structured turn fields exactly.",
+                                      budget.input_messages)
 
-        def retry(correction: str) -> str:
+        def retry(correction: str):
             retry_instructions = instructions + correction
             with stage("prompt_builder"):
                 retry_budget = select_chat_context(retry_instructions, history, prompt_turn,
@@ -255,22 +284,26 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
             first_response, same_speaker_recent=same_speaker_recent,
             recent_visible=[message.content for message in messages[-4:]],
             language="Korean" if room_language == "ko" else "English",
-            allow_repetition=False, retry=retry,
+            allow_repetition=False, retry=retry, runtime_state=runtime,
+            speaker=speaker_id, room=True, retry_allowed=not schema_retried,
         )
-        attempts = 1 + outcome.retry_count
+        attempts = max(attempts, 1 + outcome.retry_count)
         set_safe_metadata(**outcome.safe_metadata("character_pair",
                                                    "Korean" if room_language == "ko" else "English"),
                           loop_guard_triggered=outcome.initial.semantic_loop_detected)
+        set_safe_metadata(retry_count=attempts - 1, corrective_retry=attempts > 1)
         response = outcome.text
 
-        db.add(Message(conversation_id=room_id, role=MessageRole.CHARACTER,
-                       speaker_character_id=speaker_id, turn_index=expected_turn_index + 1,
-                       content=response))
+        persisted_turn = Message(conversation_id=room_id, role=MessageRole.CHARACTER,
+                                 speaker_character_id=speaker_id, turn_index=expected_turn_index + 1,
+                                 content=response)
+        db.add(persisted_turn)
         db.flush()
+        advance_runtime(runtime, outcome.turn, response, speaker_id, persisted_turn.id)
         advanced = db.execute(update(Conversation).where(
             Conversation.id == room_id, Conversation.user_id == user_id,
             Conversation.generation_token == token, Conversation.turn_index == expected_turn_index,
-        ).values(turn_index=expected_turn_index + 1, generation_token=None,
+        ).values(turn_index=expected_turn_index + 1, runtime_state=runtime.to_storage(), generation_token=None,
                  generation_lease_expires_at=None, updated_at=utcnow()))
         if advanced.rowcount != 1:
             raise HTTPException(status_code=409, detail={"code": "room_turn_stale_or_busy"})
@@ -281,7 +314,8 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
         result = {"room": _room_data(db, room, user_id), "message": persisted}
         set_safe_metadata(**_usage_totals(db, room_id, token, attempts, user_id))
         return result
-    except Exception:
+    except Exception as exc:
+        set_safe_metadata(provider_error_category=classify_llm_failure(exc).kind.value)
         _release_claim(db, room_id, user_id, token)
         if attempts:
             set_safe_metadata(**_usage_totals(db, room_id, token, attempts, user_id))

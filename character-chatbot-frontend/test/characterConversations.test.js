@@ -62,6 +62,8 @@ test("room pages wire list/create/continue/delete and durable reload/loading", (
   assert.match(room, /inflight\.current/);
   assert.match(room, /disabled=\{generating\}/);
   assert.match(room, /nextRoomTurn\(api, room\)/);
+  assert.match(room, /characterConversations\.generationFailed/);
+  assert.match(room, /await refreshRoom\(\)/);
   assert.match(detail, /resumeCharacterChat/);
   assert.match(chat, /resumeCharacterChat/);
 });

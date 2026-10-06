@@ -109,6 +109,19 @@ def generate_text(
     ))
 
 
+def generate_chat_turn(
+    db: Session, user_id: str, request_type: str, instructions: str,
+    input_messages: list[dict], max_output_tokens: int, *, task: ModelTask,
+):
+    """Meter visible reply and compact progression hints in one Responses call."""
+    from .services.conversation_runtime import ChatTurnResult
+
+    return generate_structured(
+        db, user_id, request_type, instructions, input_messages, max_output_tokens,
+        task=task, response_model=ChatTurnResult,
+    )
+
+
 def generate_structured(
     db: Session,
     user_id: str,

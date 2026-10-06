@@ -26,20 +26,12 @@ _KOREAN_SAFE = re.compile(
     r"^(?:나는|내가|난)\s+((?:고개를 숙인다|창밖을 바라본다|손등으로 눈물을 훔친다|"
     r"한숨을 쉰다|시선을 돌린다|어깨를 으쓱한다)(?:[.!?…]*)?)$"
 )
-_ENGLISH_SAFE = re.compile(r"^I\s+(look|turn|nod|smile|glance|raise|bow|pause|step)\b(.*)$", re.I | re.S)
-_ENGLISH_VERBS = {
-    "look": "Looks", "turn": "Turns", "nod": "Nods", "smile": "Smiles",
-    "glance": "Glances", "raise": "Raises", "bow": "Bows", "pause": "Pauses", "step": "Steps",
-}
 
 
 def _subjectless(action: str) -> tuple[str, bool]:
     korean = _KOREAN_SAFE.fullmatch(action)
     if korean:
         return korean.group(1), True
-    english = _ENGLISH_SAFE.fullmatch(action)
-    if english and not re.search(r"\b(?:my|mine|myself)\b", english.group(2), re.I):
-        return _ENGLISH_VERBS[english.group(1).lower()] + english.group(2), True
     return action, False
 
 

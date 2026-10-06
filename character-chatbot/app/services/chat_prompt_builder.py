@@ -8,7 +8,6 @@ from ..schemas import CharacterProfileData, WorldProfileData
 from .character_timeline import _terminal_evidence, derive_chat_reference, lived_events_before_reference
 from .chat_actions import normalize_assistant_actions
 from .chat_language import response_language
-from .conversation_loop_guard import derive_conversation_state
 
 
 def _temporal_context(profile: CharacterProfileData, current_message: str) -> str:
@@ -100,7 +99,6 @@ def build_chat_instructions(
 세계관 사실: {world_facts}"""
 
     language = response_language_override or response_language(current_message, recent_messages, locale)
-    progression_state = derive_conversation_state([content for _, content in recent_messages]).prompt_block() if recent_messages else ""
 
     return f"""당신은 지금부터 "{character_name}"라는 캐릭터를 연기합니다.
 
@@ -136,9 +134,10 @@ def build_chat_instructions(
    rhetorical template, or gesture in every recent reply. A signature motif may recur only when it adds a
    new meaning rather than making the same point again.
 10. Use the chosen response language throughout dialogue, follow-up questions, and actions. Proper nouns
-    and brief quotations may retain their original spelling. Actions should be concise, subjectless when
-    natural, and describe an immediate physical gesture/reaction. Omit unnecessary 'I', '나는', '내가', and the
-    speaker name; do not use an action block for long narration.{progression_state}"""
+    and brief quotations may retain their original spelling. In Korean, avoid Japanese kana. Actions should
+    be concise physical stage directions. English actions should use natural third-person subjectless stage
+    directions such as 'Lowers his gaze.', never first-person 'I ...'. Korean actions should omit unnecessary
+    '나는'/'내가'. Do not use an action block for long narration."""
 
 
 def build_chat_input(

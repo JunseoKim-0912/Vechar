@@ -162,6 +162,8 @@ class Conversation(Base):
     turn_index = Column(Integer, nullable=False, default=0, server_default=text("0"))
     generation_token = Column(String(36), nullable=True)
     generation_lease_expires_at = Column(DateTime, nullable=True)
+    # Versioned, bounded conversation hints; canonical profile data is never stored here.
+    runtime_state = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow,
                         server_default=text("CURRENT_TIMESTAMP"))
