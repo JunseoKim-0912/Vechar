@@ -11,8 +11,11 @@ from sqlalchemy.exc import IntegrityError
 
 from ..database import SessionLocal
 from ..llm import make_training_text_counter
-from ..llm_config import CHARACTER_EXTRACTION_OUTPUT_TOKENS, MAX_ADAPTIVE_SPLIT_DEPTH
-from ..llm_failures import FailureKind, classify_llm_failure
+from ..llm_config import (
+    ADAPTIVE_SPLIT_OVERLAP_TOKENS, CHARACTER_EXTRACTION_OUTPUT_TOKENS,
+    MAX_ADAPTIVE_SPLIT_DEPTH,
+)
+from ..llm_failures import FailureKind, LLMResponseError, classify_llm_failure
 from ..llm_operation import LLMOperation, llm_operation
 from ..models import (
     Character, IngestStatus, SourceType, TrainingJob, TrainingJobChunk,
@@ -36,6 +39,15 @@ from .world_profile_service import get_world_profile
 
 
 logger = logging.getLogger(__name__)
+
+
+class AdaptiveSplitPreparationError(RuntimeError):
+    """Safe metadata for a failed local split step; source content stays private."""
+
+    def __init__(self, stage: str, error_type: str):
+        super().__init__(f"Adaptive split preparation failed at {stage}: {error_type}")
+        self.stage = stage
+        self.error_type = error_type
 
 
 def _now() -> datetime:
@@ -112,6 +124,7 @@ def cancel_target_jobs(db, *, user_id: str, target_type: str, target_id: str) ->
         transition(job, JobStatus.CANCELLED)
         job.source_text = None
         job.completed_at = _now()
+        _terminalize_active_chunks(db, job.id, "job_cancelled")
         for chunk in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job.id):
             chunk.extraction_result = None
     # Caller commits cancellation and target deletion in one transaction.
@@ -126,6 +139,7 @@ def _handle_stage_failure(job_id: str, token: str, exc: Exception) -> str:
         if not classification.retryable or job.attempt_count >= MAX_STAGE_ATTEMPTS:
             fail_job(job, classification.code)
             job.completed_at = _now()
+            _terminalize_active_chunks(db, job_id, "job_terminal")
             for chunk in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job_id):
                 chunk.extraction_result = None
             outcome = "done"
@@ -162,6 +176,7 @@ async def process_plan(job_id: str, queue: TrainingQueue) -> str:
         if job.attempt_count >= MAX_STAGE_ATTEMPTS:
             fail_job(job, "planning_failed")
             job.completed_at = _now()
+            _terminalize_active_chunks(db, job_id, "job_terminal")
             db.commit()
             return "done"
         if JobStatus(job.status) == JobStatus.QUEUED:
@@ -236,71 +251,148 @@ def _chunk_as_value(job: TrainingJob, chunk: TrainingJobChunk) -> TrainingChunk:
     )
 
 
+def _terminalize_active_chunks(db, job_id: str, code: str) -> None:
+    """Fence queued/in-flight siblings when their job becomes terminal."""
+    for chunk in db.query(TrainingJobChunk).filter(
+        TrainingJobChunk.job_id == job_id,
+        TrainingJobChunk.status.in_([ChunkStatus.QUEUED.value, ChunkStatus.PROCESSING.value]),
+    ):
+        chunk.status = ChunkStatus.FAILED.value
+        chunk.error_code = code
+        chunk.lease_token = None
+        chunk.lease_expires_at = None
+        chunk.completed_at = _now()
+
+
+def _cancel_missing_target(job_id: str) -> str:
+    with SessionLocal() as db:
+        job = _lock_job(db, job_id)
+        if not job or JobStatus(job.status) in TERMINAL_JOBS or _target_exists(db, job):
+            return "done"
+        transition(job, JobStatus.CANCELLED)
+        job.source_text = None
+        job.completed_at = _now()
+        _terminalize_active_chunks(db, job_id, "job_cancelled")
+        for chunk in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job_id):
+            chunk.extraction_result = None
+        db.commit()
+    return "done"
+
+
+def _validated_parent_value(job: TrainingJob, chunk: TrainingJobChunk) -> TrainingChunk:
+    source = job.source_text
+    if source is None or hashlib.sha256(source.encode("utf-8")).hexdigest() != job.source_hash:
+        raise ValueError("Training source unavailable or changed after planning")
+    if not (0 <= chunk.source_start <= chunk.core_start < chunk.core_end <= len(source)
+            and 0 <= chunk.token_start < chunk.token_end <= job.source_tokens
+            and chunk.overlap_tokens >= 0):
+        raise ValueError("Training chunk offsets do not map to the planned source")
+    return _chunk_as_value(job, chunk)
+
+
 async def _split_output_limited_chunk(
     job_id: str, chunk_id: str, token: str, queue: TrainingQueue,
 ) -> str | None:
     """Replace just the failed character leaf; None means bounded fallback is exhausted."""
-    with SessionLocal() as db:
-        job = db.get(TrainingJob, job_id)
-        parent = db.get(TrainingJobChunk, chunk_id)
-        if (not job or not parent or parent.job_id != job_id
-                or JobStatus(job.status) != JobStatus.EXTRACTING
-                or parent.status != ChunkStatus.PROCESSING.value or parent.lease_token != token):
-            return "done"
-        if job.target_type != "character" or parent.split_depth >= MAX_ADAPTIVE_SPLIT_DEPTH:
-            return None
-        if job.source_text is None or not _target_exists(db, job):
-            return "done"
-        source = job.source_text
-        parent_value = _chunk_as_value(job, parent)
-        count_tokens = make_training_text_counter(
-            db, job.user_id, "character_extraction", CHARACTER_EXTRACTION_OUTPUT_TOKENS,
-        )
-        children = split_training_chunk(source, parent_value, count_tokens)
-        if children is None:
-            return None
+    stage = "load_parent"
+    try:
+        with SessionLocal() as db:
+            job = db.get(TrainingJob, job_id)
+            parent = db.get(TrainingJobChunk, chunk_id)
+            if (not job or not parent or parent.job_id != job_id
+                    or JobStatus(job.status) != JobStatus.EXTRACTING
+                    or parent.status != ChunkStatus.PROCESSING.value or parent.lease_token != token):
+                return "done"
+            if job.target_type != "character" or parent.split_depth >= MAX_ADAPTIVE_SPLIT_DEPTH:
+                logger.warning("training adaptive split exhausted job_id=%s chunk_id=%s depth=%d "
+                               "core_tokens=%d split_stage=eligibility reason=max_depth",
+                               job_id, chunk_id, parent.split_depth, parent.token_end - parent.token_start)
+                return None
+            if not _target_exists(db, job):
+                db.rollback()
+                return _cancel_missing_target(job_id)
+            stage = "source_reconstruction"
+            parent_value = _validated_parent_value(job, parent)
+            source = job.source_text
+            stage = "token_counter"
+            count_tokens = make_training_text_counter(
+                db, job.user_id, "character_extraction", CHARACTER_EXTRACTION_OUTPUT_TOKENS,
+            )
+            stage = "semantic_split"
+            children = split_training_chunk(source, parent_value, count_tokens)
+            if children is None:
+                logger.warning("training adaptive split exhausted job_id=%s chunk_id=%s depth=%d "
+                               "core_tokens=%d split_stage=semantic_split reason=min_child",
+                               job_id, chunk_id, parent.split_depth, parent.token_end - parent.token_start)
+                return None
+            left, right = children
+            if not (left.core_start == parent.core_start and left.core_end == right.core_start
+                    and right.core_end == parent.core_end
+                    and left.token_start == parent.token_start and left.token_end == right.token_start
+                    and right.token_end == parent.token_end
+                    and min(left.token_end - left.token_start, right.token_end - right.token_start) > 0
+                    and right.overlap_tokens <= ADAPTIVE_SPLIT_OVERLAP_TOKENS):
+                raise ValueError("Adaptive child ranges do not cover the parent core")
+    except Exception as exc:
+        raise AdaptiveSplitPreparationError(stage, type(exc).__name__) from exc
 
-    with SessionLocal() as db:
-        job = _lock_job(db, job_id)
-        parent = db.query(TrainingJobChunk).filter(
-            TrainingJobChunk.id == chunk_id, TrainingJobChunk.job_id == job_id,
-        ).with_for_update().first()
-        if (not job or not parent or JobStatus(job.status) != JobStatus.EXTRACTING
-                or parent.status != ChunkStatus.PROCESSING.value or parent.lease_token != token
-                or job.source_text is None or not _target_exists(db, job)):
-            return "done"
-        next_index = (db.query(func.max(TrainingJobChunk.chunk_index))
-                      .filter(TrainingJobChunk.job_id == job_id).scalar() or 0) + 1
-        child_ids = []
-        for order, child in enumerate(children, 1):
-            child_id = str(uuid5(NAMESPACE_URL, f"training:{job_id}:parent:{parent.id}:child:{order}"))
-            db.add(TrainingJobChunk(
-                id=child_id, job_id=job_id, chunk_index=next_index + order - 1,
-                parent_chunk_id=parent.id, split_depth=parent.split_depth + 1,
-                child_order=order, status=ChunkStatus.QUEUED.value,
-                source_start=child.source_start, core_start=child.core_start,
-                core_end=child.core_end, token_start=child.token_start,
-                token_end=child.token_end,
-                token_count=max(0, child.token_end - child.token_start + child.overlap_tokens),
-                overlap_tokens=child.overlap_tokens,
-            ))
-            child_ids.append(child_id)
-        parent.status = ChunkStatus.SPLIT.value
-        parent.error_code = "llm_output_limit"
-        parent.lease_token = None
-        parent.lease_expires_at = None
-        parent.completed_at = _now()
-        job.total_chunks += 1  # Two active children replace one active parent.
-        job.direct_mode = False
-        job.progress = int(85 * job.completed_chunks / job.total_chunks)
-        db.commit()
-        logger.warning(
-            "training chunk split job_id=%s parent_chunk_id=%s child_ids=%s depth=%d "
-            "parent_token_range=%d-%d child_token_ranges=%s trigger=output_limit",
-            job_id, chunk_id, child_ids, parent.split_depth + 1,
-            parent.token_start, parent.token_end,
-            [(child.token_start, child.token_end) for child in children],
-        )
+    stage = "persist_children"
+    try:
+        with SessionLocal() as db:
+            job = _lock_job(db, job_id)
+            parent = db.query(TrainingJobChunk).filter(
+                TrainingJobChunk.id == chunk_id, TrainingJobChunk.job_id == job_id,
+            ).with_for_update().first()
+            if (not job or not parent or JobStatus(job.status) != JobStatus.EXTRACTING
+                    or parent.status != ChunkStatus.PROCESSING.value or parent.lease_token != token):
+                return "done"
+            if job.source_text is None:
+                raise ValueError("Training source disappeared before child persistence")
+            if not _target_exists(db, job):
+                transition(job, JobStatus.CANCELLED)
+                job.source_text = None
+                job.completed_at = _now()
+                _terminalize_active_chunks(db, job_id, "job_cancelled")
+                for chunk in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job_id):
+                    chunk.extraction_result = None
+                db.commit()
+                return "done"
+            next_index = (db.query(func.max(TrainingJobChunk.chunk_index))
+                          .filter(TrainingJobChunk.job_id == job_id).scalar() or 0) + 1
+            child_ids = []
+            for order, child in enumerate(children, 1):
+                child_id = str(uuid5(NAMESPACE_URL, f"training:{job_id}:parent:{parent.id}:child:{order}"))
+                db.add(TrainingJobChunk(
+                    id=child_id, job_id=job_id, chunk_index=next_index + order - 1,
+                    parent_chunk_id=parent.id, split_depth=parent.split_depth + 1,
+                    child_order=order, status=ChunkStatus.QUEUED.value,
+                    source_start=child.source_start, core_start=child.core_start,
+                    core_end=child.core_end, token_start=child.token_start,
+                    token_end=child.token_end,
+                    token_count=max(0, child.token_end - child.token_start + child.overlap_tokens),
+                    overlap_tokens=child.overlap_tokens,
+                ))
+                child_ids.append(child_id)
+            parent.status = ChunkStatus.SPLIT.value
+            parent.error_code = "llm_output_limit"
+            next_depth = parent.split_depth + 1
+            parent_token_start, parent_token_end = parent.token_start, parent.token_end
+            parent.lease_token = None
+            parent.lease_expires_at = None
+            parent.completed_at = _now()
+            job.total_chunks += 1  # Two active children replace one active parent.
+            job.direct_mode = False
+            job.progress = int(85 * job.completed_chunks / job.total_chunks)
+            db.commit()
+    except Exception as exc:
+        raise AdaptiveSplitPreparationError(stage, type(exc).__name__) from exc
+    logger.warning(
+        "training chunk split job_id=%s parent_chunk_id=%s child_ids=%s depth=%d "
+        "parent_token_range=%d-%d child_token_ranges=%s trigger=output_limit",
+        job_id, chunk_id, child_ids, next_depth,
+        parent_token_start, parent_token_end,
+        [(child.token_start, child.token_end) for child in children],
+    )
     try:
         for child_id in child_ids:
             await queue.publish_chunk(job_id, child_id)
@@ -311,19 +403,30 @@ async def _split_output_limited_chunk(
     return "done"
 
 
-def _handle_chunk_failure(job_id: str, chunk_id: str, token: str, exc: Exception) -> str:
+def _handle_chunk_failure(
+    job_id: str, chunk_id: str, token: str, exc: Exception,
+    *, chunk_code: str | None = None, job_code: str | None = None,
+) -> str:
     with SessionLocal() as db:
         job = _lock_job(db, job_id)
         chunk = db.query(TrainingJobChunk).filter(TrainingJobChunk.id == chunk_id,
                                                    TrainingJobChunk.job_id == job_id).first()
         if not job or not chunk or chunk.lease_token != token or JobStatus(job.status) in TERMINAL_JOBS:
             return "done"
+        if not _target_exists(db, job):
+            db.rollback()
+            return _cancel_missing_target(job_id)
         classification = classify_llm_failure(exc)
         if not classification.retryable or chunk.attempt_count >= MAX_CHUNK_ATTEMPTS:
             chunk.status = ChunkStatus.FAILED.value
-            chunk.error_code = classification.code
-            fail_job(job, classification.code)
+            chunk.error_code = chunk_code or classification.code
+            chunk.lease_token = None
+            chunk.lease_expires_at = None
+            chunk.completed_at = _now()
+            fail_job(job, job_code or classification.code)
             job.completed_at = _now()
+            db.flush()
+            _terminalize_active_chunks(db, job_id, "job_terminal")
             for item in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job_id):
                 item.extraction_result = None
             outcome = "done"
@@ -341,15 +444,84 @@ def _handle_chunk_failure(job_id: str, chunk_id: str, token: str, exc: Exception
     return outcome
 
 
+def _defer_split_preparation(job_id: str, chunk_id: str, token: str) -> str:
+    with SessionLocal() as db:
+        job = _lock_job(db, job_id)
+        chunk = db.query(TrainingJobChunk).filter(
+            TrainingJobChunk.id == chunk_id, TrainingJobChunk.job_id == job_id,
+        ).with_for_update().first()
+        if (not job or not chunk or JobStatus(job.status) != JobStatus.EXTRACTING
+                or chunk.status != ChunkStatus.PROCESSING.value or chunk.lease_token != token):
+            return "done"
+        if chunk.attempt_count >= MAX_CHUNK_ATTEMPTS:
+            chunk.status = ChunkStatus.FAILED.value
+            chunk.error_code = "adaptive_split_failed"
+            chunk.completed_at = _now()
+            fail_job(job, "adaptive_split_failed")
+            job.completed_at = _now()
+            db.flush()
+            _terminalize_active_chunks(db, job_id, "job_terminal")
+            for item in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job_id):
+                item.extraction_result = None
+            outcome = "done"
+        else:
+            chunk.status = ChunkStatus.QUEUED.value
+            chunk.error_code = "adaptive_split_pending"
+            outcome = "retry"
+        chunk.lease_token = None
+        chunk.lease_expires_at = None
+        db.commit()
+    return outcome
+
+
+async def _handle_output_limited_chunk(
+    job_id: str, chunk_id: str, token: str, queue: TrainingQueue, exc: Exception,
+) -> str:
+    try:
+        outcome = await _split_output_limited_chunk(job_id, chunk_id, token, queue)
+    except Exception as split_exc:
+        with SessionLocal() as db:
+            chunk = db.get(TrainingJobChunk, chunk_id)
+            depth = chunk.split_depth if chunk else None
+            core_tokens = chunk.token_end - chunk.token_start if chunk else None
+        logger.warning(
+            "training adaptive split preparation failed job_id=%s chunk_id=%s depth=%s "
+            "core_tokens=%s error_type=%s split_stage=%s",
+            job_id, chunk_id, depth, core_tokens,
+            split_exc.error_type if isinstance(split_exc, AdaptiveSplitPreparationError)
+            else type(split_exc).__name__,
+            split_exc.stage if isinstance(split_exc, AdaptiveSplitPreparationError) else "unknown",
+        )
+        cause = split_exc.__cause__ or split_exc
+        if classify_llm_failure(cause).kind == FailureKind.BUDGET:
+            return _handle_chunk_failure(job_id, chunk_id, token, cause)
+        return _defer_split_preparation(job_id, chunk_id, token)
+    if outcome is not None:
+        return outcome
+    return _handle_chunk_failure(
+        job_id, chunk_id, token, exc, chunk_code="adaptive_split_exhausted",
+    )
+
+
 async def process_chunk(job_id: str, chunk_id: str, queue: TrainingQueue) -> str:
     """Atomic short claim, unmetered duplicate no-op, metered extraction, fenced save."""
     with SessionLocal() as db:
-        job = db.get(TrainingJob, job_id)
+        job = _lock_job(db, job_id)
         chunk = db.get(TrainingJobChunk, chunk_id)
-        if not job or not chunk or chunk.job_id != job_id or JobStatus(job.status) in TERMINAL_JOBS:
+        if not job or not chunk or chunk.job_id != job_id:
+            return "done"
+        if JobStatus(job.status) in TERMINAL_JOBS:
+            if chunk.status in {ChunkStatus.QUEUED.value, ChunkStatus.PROCESSING.value}:
+                chunk.status = ChunkStatus.FAILED.value
+                chunk.error_code = "job_cancelled" if job.status == JobStatus.CANCELLED.value else "job_terminal"
+                chunk.lease_token = None
+                chunk.lease_expires_at = None
+                chunk.completed_at = _now()
+                db.commit()
             return "done"
         if chunk.status == ChunkStatus.COMPLETED.value:
             all_done = (job.completed_chunks == job.total_chunks and job.total_chunks > 0)
+            db.rollback()
             if all_done:
                 await queue.publish_finalize(job_id)
             return "done"
@@ -369,10 +541,23 @@ async def process_chunk(job_id: str, chunk_id: str, queue: TrainingQueue) -> str
             return "done"
         if JobStatus(job.status) != JobStatus.EXTRACTING:
             return "busy"
+        resume_split = chunk.error_code == "adaptive_split_pending"
         if chunk.status == ChunkStatus.PROCESSING.value and chunk.lease_expires_at and chunk.lease_expires_at > _now():
             return "busy"
         if chunk.attempt_count >= MAX_CHUNK_ATTEMPTS:
-            return _handle_chunk_failure(job_id, chunk_id, chunk.lease_token or "", RuntimeError("Attempt limit"))
+            chunk.status = ChunkStatus.FAILED.value
+            chunk.error_code = "adaptive_split_failed" if resume_split else "training_failed"
+            chunk.lease_token = None
+            chunk.lease_expires_at = None
+            chunk.completed_at = _now()
+            fail_job(job, chunk.error_code)
+            job.completed_at = _now()
+            db.flush()
+            _terminalize_active_chunks(db, job_id, "job_terminal")
+            for item in db.query(TrainingJobChunk).filter(TrainingJobChunk.job_id == job_id):
+                item.extraction_result = None
+            db.commit()
+            return "done"
         token = str(uuid4())
         changed = db.query(TrainingJobChunk).filter(
             TrainingJobChunk.id == chunk_id,
@@ -389,11 +574,21 @@ async def process_chunk(job_id: str, chunk_id: str, queue: TrainingQueue) -> str
         db.commit()
         if changed != 1:
             return "busy"
+    if resume_split:
+        return await _handle_output_limited_chunk(
+            job_id, chunk_id, token, queue,
+            LLMResponseError(FailureKind.OUTPUT_LIMIT, "Adaptive split pending"),
+        )
     try:
         with SessionLocal() as db:
             job = db.get(TrainingJob, job_id)
             chunk = db.get(TrainingJobChunk, chunk_id)
-            if not job or not chunk or job.source_text is None or not _target_exists(db, job):
+            if not job or not chunk or JobStatus(job.status) != JobStatus.EXTRACTING:
+                return "done"
+            if not _target_exists(db, job):
+                db.rollback()
+                return _cancel_missing_target(job_id)
+            if job.source_text is None:
                 raise RuntimeError("Training target/source unavailable")
             plan = _chunk_as_value(job, chunk)
             with llm_operation(LLMOperation(
@@ -459,17 +654,7 @@ async def process_chunk(job_id: str, chunk_id: str, queue: TrainingQueue) -> str
                                job_id, chunk_id, type(exc).__name__)
                 return "retry"
         if classify_llm_failure(exc).kind == FailureKind.OUTPUT_LIMIT:
-            try:
-                outcome = await _split_output_limited_chunk(job_id, chunk_id, token, queue)
-            except Exception as split_exc:
-                logger.warning("training adaptive split unavailable job_id=%s chunk_id=%s error_type=%s",
-                               job_id, chunk_id, type(split_exc).__name__)
-                # Never repeat the same output-capped provider call because a
-                # token-count/split preparation step had a transient failure.
-                failure = (split_exc if classify_llm_failure(split_exc).kind == FailureKind.BUDGET else exc)
-                return _handle_chunk_failure(job_id, chunk_id, token, failure)
-            if outcome is not None:
-                return outcome
+            return await _handle_output_limited_chunk(job_id, chunk_id, token, queue, exc)
         return _handle_chunk_failure(job_id, chunk_id, token, exc)
 
 

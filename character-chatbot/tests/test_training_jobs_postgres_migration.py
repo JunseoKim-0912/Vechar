@@ -2,6 +2,7 @@
 
 import os
 import asyncio
+import hashlib
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Character, Conversation, MemoryIngestion, Message, MessageRole, TrainingJob, TrainingJobChunk, User
 from app.database import Base
-from app.llm_failures import DuplicateLLMOperation
+from app.llm_failures import DuplicateLLMOperation, FailureKind, LLMResponseError
 from app import llm_usage
 from app.schemas import CharacterProfileData
 from app.services import memory_jobs, memory_service, training_jobs
@@ -111,6 +112,67 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
                         release.set()
                         self.assertEqual(first.result(timeout=10), "done")
                 self.assertEqual(len(calls), 1)
+                # Persist an adaptive split under real PostgreSQL row locks. A
+                # competing delivery must not create a second child pair.
+                split_source = "A" * 11_790
+                with Session(engine) as db:
+                    split_target = Character(user_id=user_id, name="Split fixture")
+                    db.add(split_target)
+                    db.flush()
+                    split_job = TrainingJob(
+                        user_id=user_id, target_type="character", target_id=split_target.id,
+                        source_type="text", training_source_type="STORY", source_text=split_source,
+                        source_hash=hashlib.sha256(split_source.encode("utf-8")).hexdigest(),
+                        source_char_count=len(split_source), source_tokens=len(split_source),
+                        status="extracting", stage="extracting", total_chunks=1, direct_mode=True,
+                    )
+                    db.add(split_job)
+                    db.flush()
+                    split_chunk = TrainingJobChunk(
+                        job_id=split_job.id, chunk_index=1, status="queued",
+                        source_start=0, core_start=0, core_end=len(split_source),
+                        token_start=0, token_end=len(split_source), token_count=len(split_source), overlap_tokens=0,
+                    )
+                    db.add(split_chunk)
+                    db.commit()
+                    split_job_id, split_chunk_id, split_target_id = split_job.id, split_chunk.id, split_target.id
+                split_entered, split_release = Event(), Event()
+                split_calls = []
+
+                def overflow(*args, **kwargs):
+                    split_calls.append(1)
+                    split_entered.set()
+                    self.assertTrue(split_release.wait(10))
+                    raise LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")
+
+                split_queue = InMemoryTrainingQueue()
+                with patch.object(training_jobs, "SessionLocal", lambda: Session(engine)), \
+                     patch.object(training_jobs, "make_training_text_counter", return_value=len), \
+                     patch.object(training_jobs, "extract_profile_from_text", side_effect=overflow):
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        first_split = pool.submit(lambda: asyncio.run(training_jobs.process_chunk(
+                            split_job_id, split_chunk_id, split_queue)))
+                        self.assertTrue(split_entered.wait(10))
+                        competing = pool.submit(lambda: asyncio.run(training_jobs.process_chunk(
+                            split_job_id, split_chunk_id, split_queue)))
+                        self.assertEqual(competing.result(timeout=10), "busy")
+                        split_release.set()
+                        self.assertEqual(first_split.result(timeout=10), "done")
+                    self.assertEqual(asyncio.run(training_jobs.process_chunk(
+                        split_job_id, split_chunk_id, split_queue)), "done")
+                self.assertEqual(len(split_calls), 1)
+                with Session(engine) as db:
+                    self.assertEqual(db.get(TrainingJob, split_job_id).total_chunks, 2)
+                    self.assertEqual(db.get(TrainingJobChunk, split_chunk_id).status, "split")
+                    children = db.query(TrainingJobChunk).filter_by(
+                        job_id=split_job_id, parent_chunk_id=split_chunk_id,
+                    ).order_by(TrainingJobChunk.child_order).all()
+                    self.assertEqual(len(children), 2)
+                    self.assertEqual([child.status for child in children], ["queued", "queued"])
+                    db.query(TrainingJobChunk).filter_by(job_id=split_job_id).delete()
+                    db.query(TrainingJob).filter_by(id=split_job_id).delete()
+                    db.query(Character).filter_by(id=split_target_id).delete()
+                    db.commit()
                 with Session(engine) as db:
                     conversation = Conversation(user_id=user_id, character_id=target_id)
                     db.add(conversation)

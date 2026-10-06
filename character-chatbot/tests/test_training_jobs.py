@@ -1,6 +1,7 @@
 """Queue orchestration tests; every LLM call is a local mock."""
 
 import asyncio
+import hashlib
 import os
 import unittest
 from datetime import timedelta
@@ -10,7 +11,7 @@ from unittest.mock import Mock, patch
 import httpx2
 from fastapi import HTTPException
 from openai import InternalServerError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -142,6 +143,10 @@ class TrainingJobWorkerTests(unittest.TestCase):
             self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
             children = self.children(job_id, root)
             self.assertEqual(len(children), 2)
+            with self.sessions() as db:
+                self.assertEqual(db.get(TrainingJobChunk, root).status, "split")
+                self.assertEqual([db.get(TrainingJobChunk, child).status for child in children],
+                                 ["queued", "queued"])
             self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
             self.assertEqual(self.children(job_id, root), children)
             self.assertEqual(extract.call_count, 1)
@@ -236,6 +241,245 @@ class TrainingJobWorkerTests(unittest.TestCase):
             self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
             self.assertEqual(self.children(job_id, root), children)
             extract.assert_called_once()
+        before_replay = len(self.queue.messages)
+        self.assertEqual(self.run_async(training_jobs.process_plan(job_id, self.queue)), "done")
+        replayed = [payload["chunk_id"] for _, payload in self.queue.messages[before_replay:]
+                    if "chunk_id" in payload]
+        self.assertTrue(set(children) <= set(replayed))
+
+    def test_split_preparation_error_retries_without_reextracting_parent(self):
+        job_id = self.submit(text="A" * 11_790)
+        root = self.plan(job_id)[0]
+        error = LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=error) as extract, \
+             patch.object(training_jobs, "make_training_text_counter",
+                          side_effect=[RuntimeError("counter unavailable"), len]):
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "retry")
+            with self.sessions() as db:
+                self.assertEqual(db.get(TrainingJob, job_id).status, "extracting")
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+            self.assertEqual(len(self.children(job_id, root)), 2)
+            extract.assert_called_once()
+
+    def test_child_insert_failure_rolls_back_parent_split_and_can_recover(self):
+        job_id = self.submit(text="A" * 11_790)
+        root = self.plan(job_id)[0]
+
+        def reject_children(session, flush_context, instances):
+            if any(isinstance(row, TrainingJobChunk) and row.parent_chunk_id == root
+                   for row in session.new):
+                raise RuntimeError("child insert unavailable")
+
+        event.listen(Session, "before_flush", reject_children)
+        try:
+            with patch.object(training_jobs, "extract_profile_from_text",
+                              side_effect=LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")) as extract:
+                self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "retry")
+                extract.assert_called_once()
+        finally:
+            event.remove(Session, "before_flush", reject_children)
+        with self.sessions() as db:
+            parent = db.get(TrainingJobChunk, root)
+            self.assertEqual((parent.status, parent.error_code), ("queued", "adaptive_split_pending"))
+            self.assertEqual(db.query(TrainingJobChunk).filter_by(parent_chunk_id=root).count(), 0)
+        with patch.object(training_jobs, "extract_profile_from_text") as extract:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+            extract.assert_not_called()
+        self.assertEqual(len(self.children(job_id, root)), 2)
+
+    def test_repeated_split_preparation_failure_has_distinct_terminal_code(self):
+        job_id = self.submit(text="A" * 11_790)
+        root = self.plan(job_id)[0]
+        with patch.object(training_jobs, "extract_profile_from_text",
+                          side_effect=LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")) as extract, \
+             patch.object(training_jobs, "make_training_text_counter",
+                          side_effect=RuntimeError("counter unavailable")):
+            outcomes = [self.run_async(training_jobs.process_chunk(job_id, root, self.queue))
+                        for _ in range(MAX_CHUNK_ATTEMPTS)]
+            self.assertEqual(outcomes, ["retry", "retry", "done"])
+            extract.assert_called_once()
+        with self.sessions() as db:
+            self.assertEqual(db.get(TrainingJob, job_id).error_code, "adaptive_split_failed")
+            self.assertEqual(db.get(TrainingJobChunk, root).status, "failed")
+
+    def test_production_sized_roots_split_into_durable_ordered_children(self):
+        error = LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")
+        for core_tokens in (11_790, 13_877):
+            with self.subTest(core_tokens=core_tokens):
+                with self.sessions() as db:
+                    target = Character(user_id=self.user_id, name=f"Root {core_tokens}")
+                    db.add(target)
+                    db.commit()
+                    self.character_id = target.id
+                job_id = self.submit(text=("Chapter one.\n\n" + "A" * (core_tokens - 14)))
+                root = self.plan(job_id)[0]
+                with patch.object(training_jobs, "extract_profile_from_text", side_effect=error):
+                    self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+                with self.sessions() as db:
+                    job = db.get(TrainingJob, job_id)
+                    parent = db.get(TrainingJobChunk, root)
+                    children = db.query(TrainingJobChunk).filter_by(
+                        job_id=job_id, parent_chunk_id=root,
+                    ).order_by(TrainingJobChunk.child_order).all()
+                    self.assertEqual((job.status, job.total_chunks), ("extracting", 2))
+                    self.assertEqual(parent.status, "split")
+                    self.assertEqual(len(children), 2)
+                    self.assertEqual([child.status for child in children], ["queued", "queued"])
+                    self.assertEqual([child.split_depth for child in children], [1, 1])
+                    self.assertEqual([child.child_order for child in children], [1, 2])
+                    self.assertEqual(children[0].core_start, parent.core_start)
+                    self.assertEqual(children[0].core_end, children[1].core_start)
+                    self.assertEqual(children[1].core_end, parent.core_end)
+                    self.assertTrue(all(child.token_end - child.token_start >= 3_000 for child in children))
+                    self.assertLessEqual(children[1].overlap_tokens, 128)
+                    child_ids = [child.id for child in children]
+                self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+                self.assertEqual(self.children(job_id, root), child_ids)
+
+    def test_source_normalization_and_offset_mismatch_are_detected_before_split(self):
+        job_id = self.submit(text="\ufeff" + "A" * 11_790 + "\r\n")
+        root = self.plan(job_id)[0]
+        with self.sessions() as db:
+            job = db.get(TrainingJob, job_id)
+            self.assertNotIn("\r", job.source_text)
+            chunk = db.get(TrainingJobChunk, root)
+            chunk.core_end = len(job.source_text) + 1
+            db.commit()
+        with patch.object(training_jobs, "extract_profile_from_text",
+                          side_effect=LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")) as extract:
+            with self.assertLogs(training_jobs.logger, level="WARNING") as captured:
+                self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "retry")
+            self.assertTrue(any("split_stage=source_reconstruction" in row for row in captured.output))
+            self.assertEqual(self.children(job_id, root), [])
+            with self.sessions() as db:
+                chunk = db.get(TrainingJobChunk, root)
+                self.assertEqual(chunk.error_code, "adaptive_split_pending")
+                chunk.core_end = len(db.get(TrainingJob, job_id).source_text)
+                db.commit()
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+            extract.assert_called_once()
+        self.assertEqual(len(self.children(job_id, root)), 2)
+
+    def test_cleared_source_during_output_limit_is_reported_not_misclassified_exhausted(self):
+        job_id = self.submit(text="A" * 11_790)
+        root = self.plan(job_id)[0]
+
+        def lose_source(*args, **kwargs):
+            with self.sessions() as db:
+                db.get(TrainingJob, job_id).source_text = None
+                db.commit()
+            raise LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")
+
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=lose_source) as extract:
+            with self.assertLogs(training_jobs.logger, level="WARNING") as captured:
+                self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "retry")
+            self.assertTrue(any("split_stage=source_reconstruction" in row for row in captured.output))
+            extract.assert_called_once()
+        with self.sessions() as db:
+            job = db.get(TrainingJob, job_id)
+            self.assertEqual(job.status, "extracting")
+            self.assertEqual(db.get(TrainingJobChunk, root).error_code, "adaptive_split_pending")
+            job.source_text = "A" * 11_790
+            db.commit()
+        with patch.object(training_jobs, "extract_profile_from_text") as extract:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+            extract.assert_not_called()
+        self.assertEqual(len(self.children(job_id, root)), 2)
+
+    def test_overlapped_production_second_root_reconstructs_and_splits(self):
+        source = "A" * 11_790 + "B" * 13_877
+        with self.sessions() as db:
+            job = TrainingJob(
+                user_id=self.user_id, target_type="character", target_id=self.character_id,
+                source_type="text", training_source_type="STORY", source_text=source,
+                source_hash=hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                source_char_count=len(source), source_tokens=len(source),
+                status="extracting", stage="extracting", total_chunks=2, completed_chunks=1,
+                direct_mode=False,
+            )
+            db.add(job)
+            db.flush()
+            first = TrainingJobChunk(
+                job_id=job.id, chunk_index=1, status="completed",
+                source_start=0, core_start=0, core_end=11_790,
+                token_start=0, token_end=11_790, token_count=11_790, overlap_tokens=0,
+                extraction_result=CharacterProfileData().model_dump(),
+            )
+            second = TrainingJobChunk(
+                job_id=job.id, chunk_index=2, status="queued",
+                source_start=11_790 - 698, core_start=11_790, core_end=len(source),
+                token_start=11_790, token_end=len(source), token_count=13_877 + 698,
+                overlap_tokens=698,
+            )
+            db.add_all([first, second])
+            db.commit()
+            job_id, root = job.id, second.id
+        with patch.object(training_jobs, "extract_profile_from_text",
+                          side_effect=LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete")):
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, root, self.queue)), "done")
+        with self.sessions() as db:
+            parent = db.get(TrainingJobChunk, root)
+            children = db.query(TrainingJobChunk).filter_by(
+                job_id=job_id, parent_chunk_id=root,
+            ).order_by(TrainingJobChunk.child_order).all()
+            self.assertEqual(parent.status, "split")
+            self.assertEqual(len(children), 2)
+            self.assertEqual(children[0].source_start, 11_790 - 698)
+            self.assertEqual(children[0].overlap_tokens, 698)
+            self.assertEqual(children[0].core_start, 11_790)
+            self.assertEqual(children[0].core_end, children[1].core_start)
+            self.assertEqual(children[1].core_end, len(source))
+            self.assertTrue(all(child.core_end - child.core_start >= 3_000 for child in children))
+
+    def test_terminal_failure_fences_inflight_sibling_and_delayed_delivery(self):
+        job_id = self.submit(text="A" * 25_667)
+        first, second = self.plan(job_id)
+        with self.sessions() as db:
+            root = db.get(TrainingJobChunk, first)
+            root.status = "processing"
+            root.lease_token = "root-a"
+            root.attempt_count = 1
+            db.commit()
+
+        def finish_sibling(*args, **kwargs):
+            self.assertEqual(training_jobs._handle_chunk_failure(
+                job_id, first, "root-a", LLMResponseError(FailureKind.OUTPUT_LIMIT, "incomplete"),
+                chunk_code="adaptive_split_exhausted",
+            ), "done")
+            return CharacterProfileData(personality_summary="late result")
+
+        with patch.object(training_jobs, "extract_profile_from_text", side_effect=finish_sibling) as extract:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, second, self.queue)), "done")
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, second, self.queue)), "done")
+            extract.assert_called_once()
+        with self.sessions() as db:
+            job = db.get(TrainingJob, job_id)
+            self.assertEqual((job.status, job.error_code), ("failed", "llm_output_limit"))
+            self.assertEqual(db.get(TrainingJobChunk, first).error_code, "adaptive_split_exhausted")
+            sibling = db.get(TrainingJobChunk, second)
+            self.assertEqual((sibling.status, sibling.error_code), ("failed", "job_terminal"))
+            self.assertIsNone(sibling.lease_token)
+            self.assertEqual(db.query(TrainingJobChunk).filter_by(job_id=job_id, status="processing").count(), 0)
+
+    def test_delayed_delivery_heals_preexisting_terminal_processing_chunk(self):
+        job_id = self.submit()
+        chunk_id = self.plan(job_id)[0]
+        with self.sessions() as db:
+            job = db.get(TrainingJob, job_id)
+            job.status = "failed"
+            job.stage = "failed"
+            job.source_text = None
+            chunk = db.get(TrainingJobChunk, chunk_id)
+            chunk.status = "processing"
+            chunk.lease_token = "obsolete"
+            db.commit()
+        with patch.object(training_jobs, "extract_profile_from_text") as extract:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
+            extract.assert_not_called()
+        with self.sessions() as db:
+            chunk = db.get(TrainingJobChunk, chunk_id)
+            self.assertEqual((chunk.status, chunk.error_code), ("failed", "job_terminal"))
+            self.assertIsNone(chunk.lease_token)
 
     def test_direct_character_and_world_complete_and_clear_private_artifacts(self):
         for kind in ("character", "world"):
@@ -280,6 +524,23 @@ class TrainingJobWorkerTests(unittest.TestCase):
                 db.commit()
             self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
             mock.assert_called_once()
+
+    def test_exhausted_stale_claim_is_terminal_without_new_provider_call(self):
+        job_id = self.submit()
+        chunk_id = self.plan(job_id)[0]
+        with self.sessions() as db:
+            chunk = db.get(TrainingJobChunk, chunk_id)
+            chunk.status = "processing"
+            chunk.attempt_count = MAX_CHUNK_ATTEMPTS
+            chunk.lease_token = "expired"
+            chunk.lease_expires_at = training_jobs._now() - timedelta(seconds=1)
+            db.commit()
+        with patch.object(training_jobs, "extract_profile_from_text") as extract:
+            self.assertEqual(self.run_async(training_jobs.process_chunk(job_id, chunk_id, self.queue)), "done")
+            extract.assert_not_called()
+        with self.sessions() as db:
+            self.assertEqual(db.get(TrainingJob, job_id).status, "failed")
+            self.assertEqual(db.get(TrainingJobChunk, chunk_id).status, "failed")
 
     def test_transient_failure_retries_then_terminal_limit(self):
         job_id = self.submit()
