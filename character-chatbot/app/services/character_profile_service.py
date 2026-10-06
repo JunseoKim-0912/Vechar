@@ -94,7 +94,7 @@ for an earlier flashback or a post-death event.
 
 Language policy:
 - The existing profile is canonical. Keep its dominant language, register, and writing style even if the new information is in another language.
-- Understand English, Korean, and mixed-language input without omitting facts.
+- Understand input in any model-supported language without omitting facts.
 - Preserve established spellings for names and fictional terms. Do not create an English/Korean patchwork unless the canonical profile itself intentionally uses both."""
 
 
@@ -204,7 +204,7 @@ CORRECTION_SYSTEM_PROMPT = """당신은 캐릭터 프로필 편집자입니다. 
 - A correction of current age/role/relationship must be reflected in timeline and the latest living state together.
 
 Language policy:
-- Understand correction instructions in English, Korean, or both.
+- Understand correction instructions in any model-supported language.
 - Keep the existing canonical profile's dominant language and style unless the user explicitly asks to change that canonical language or style.
 - Preserve established spellings of proper names and fictional terms."""
 

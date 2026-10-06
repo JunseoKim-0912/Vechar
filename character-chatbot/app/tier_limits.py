@@ -2,10 +2,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from .models import User, ExportLog, ImportLog
+from .models import User, Character, World, ExportLog, ImportLog
 
-# Product-tier quotas remain controlled by is_premium; admin role only bypasses
-# the LLM USD rejection gate in llm_usage.py, never these product quotas.
+# Product tier values remain independent of role. Admin skips entitlement
+# rejections, while action logs and LLM usage records are still written.
 TIER_LIMITS = {
     "free": {
         "max_worlds": 2,
@@ -34,6 +34,38 @@ def get_limits(db: Session, user_id: str) -> dict:
     return TIER_LIMITS[tier]
 
 
+def is_admin(db: Session, user_id: str) -> bool:
+    return db.query(User.role).filter(User.id == user_id).scalar() == "admin"
+
+
+def check_entity_capacity(db: Session, user_id: str, entity: str) -> None:
+    """Reality is a persisted World and consumes one of the same world slots."""
+    # Serialize user-scoped creation checks on PostgreSQL until the caller's
+    # commit. This also protects the implicit Reality creation path.
+    db.query(User.id).filter(User.id == user_id).with_for_update().first()
+    if is_admin(db, user_id):
+        return
+    model, field, label = (
+        (Character, "max_characters", "캐릭터") if entity == "character"
+        else (World, "max_worlds", "세계관") if entity == "world"
+        else (None, None, None)
+    )
+    if model is None:
+        raise ValueError(f"Unknown quota entity: {entity}")
+    limit = get_limits(db, user_id)[field]
+    if db.query(model).filter(model.user_id == user_id).count() >= limit:
+        raise HTTPException(status_code=403, detail=f"계정당 최대 {limit}개까지만 {label}을 만들 수 있습니다.")
+
+
+def correction_quota_message(db: Session, user_id: str, today_count: int) -> str | None:
+    if is_admin(db, user_id):
+        return None
+    limit = get_limits(db, user_id)["max_corrections_per_day"]
+    if today_count >= limit:
+        return f"오늘의 /수정 사용 횟수({limit}회)를 다 쓰셨습니다. 내일 다시 시도해주세요."
+    return None
+
+
 def _month_start() -> datetime:
     return datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -47,7 +79,7 @@ def check_and_log_export(db: Session, user_id: str, export_type: str, entity_id:
         .filter(ExportLog.user_id == user_id, ExportLog.created_at >= _month_start())
         .count()
     )
-    if month_count >= limits["max_exports_per_month"]:
+    if not is_admin(db, user_id) and month_count >= limits["max_exports_per_month"]:
         raise HTTPException(
             status_code=403,
             detail=f"이번 달 내보내기 횟수({limits['max_exports_per_month']}회)를 다 쓰셨습니다. 다음 달에 다시 시도해주세요.",
@@ -66,7 +98,7 @@ def check_import_quota(db: Session, user_id: str) -> None:
         .filter(ImportLog.user_id == user_id, ImportLog.created_at >= _month_start())
         .count()
     )
-    if month_count >= limits["max_imports_per_month"]:
+    if not is_admin(db, user_id) and month_count >= limits["max_imports_per_month"]:
         raise HTTPException(
             status_code=403,
             detail=f"이번 달 가져오기 횟수({limits['max_imports_per_month']}회)를 다 쓰셨습니다. 다음 달에 다시 시도해주세요.",

@@ -29,18 +29,18 @@ class LocaleSchemaAndPromptTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MessageCreateRequest(content="hello", locale="ja")
 
-    def test_chat_prompt_adds_low_priority_english_preference(self):
+    def test_chat_prompt_language_is_not_overridden_by_profile(self):
         profile = CharacterProfileData(speech_style="항상 일본어로 말한다")
         prompt = build_chat_instructions("Mina", profile, None, correction_prefix="/수정", locale="en")
         self.assertIn("항상 일본어로 말한다", prompt)
-        self.assertIn("respond in English", prompt)
-        self.assertIn("캐릭터 설정과 사용자의 현재 언어 요청보다 우선하지 않습니다", prompt)
+        self.assertIn("Respond in English", prompt)
+        self.assertIn("takes precedence over the language of source text", prompt)
 
     def test_chat_prompt_adds_korean_preference(self):
         prompt = build_chat_instructions(
             "Mina", CharacterProfileData(), None, correction_prefix="/수정", locale="ko"
         )
-        self.assertIn("한국어로 답하세요", prompt)
+        self.assertIn("Respond in Korean", prompt)
 
 
 class BilingualAnalysisPromptTests(unittest.TestCase):
@@ -61,7 +61,7 @@ class BilingualAnalysisPromptTests(unittest.TestCase):
             with self.subTest(source=source):
                 kwargs = self._extract(source)
                 self.assertIn(source, kwargs["input_messages"][0]["content"])
-                self.assertIn("English, Korean, and mixed", kwargs["instructions"])
+                self.assertIn("model-supported languages", kwargs["instructions"])
                 self.assertEqual(kwargs["task"], "analysis")
                 self.assertIs(kwargs["response_model"], CharacterProfileData)
 
@@ -95,7 +95,7 @@ class BilingualAnalysisPromptTests(unittest.TestCase):
         self.assertEqual(kwargs["task"], "analysis")
         self.assertIs(kwargs["response_model"], WorldProfileData)
 
-    def test_all_analysis_prompt_contracts_declare_bilingual_policy(self):
+    def test_all_analysis_prompt_contracts_declare_language_policy(self):
         prompts = (
             extraction_service.EXTRACTION_SYSTEM_PROMPT_TEMPLATE,
             character_extraction_service.FOCUSED_EXTRACTION_SYSTEM_PROMPT,
@@ -109,8 +109,7 @@ class BilingualAnalysisPromptTests(unittest.TestCase):
         )
         for prompt in prompts:
             with self.subTest(prompt=prompt[:40]):
-                self.assertIn("English", prompt)
-                self.assertIn("Korean", prompt)
+                self.assertIn("language", prompt.lower())
 
 
 class ChatLocaleServiceTests(unittest.TestCase):
@@ -146,7 +145,7 @@ class ChatLocaleServiceTests(unittest.TestCase):
                 chat_service.send_message(
                     self.db, self.character.id, self.conversation.id, "안녕", self.user.id, "ko"
                 )
-        self.assertIn("한국어로 답하세요", call.call_args.kwargs["instructions"])
+        self.assertIn("Respond in Korean", call.call_args.kwargs["instructions"])
         self.assertEqual(call.call_args.kwargs["input_messages"][-1], {"role": "user", "content": "안녕"})
 
     def test_locale_does_not_enter_correction_analysis_path(self):

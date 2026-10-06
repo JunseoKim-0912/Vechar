@@ -6,6 +6,7 @@ from ..models import Character, Conversation, Message
 from ..ownership import get_owned_world
 from ..schemas import MessageCreateRequest, MessageRead, ConversationCreateRequest
 from ..services.chat_service import send_message
+from ..services.chat_latency import stage
 
 router = APIRouter()
 
@@ -59,12 +60,13 @@ def post_message(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    conversation = (
-        db.query(Conversation)
-        .join(Character, Conversation.character_id == Character.id)
-        .filter(Conversation.id == conversation_id, Conversation.user_id == user_id, Character.user_id == user_id)
-        .first()
-    )
+    with stage("session_lookup"):
+        conversation = (
+            db.query(Conversation)
+            .join(Character, Conversation.character_id == Character.id)
+            .filter(Conversation.id == conversation_id, Conversation.user_id == user_id, Character.user_id == user_id)
+            .first()
+        )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 

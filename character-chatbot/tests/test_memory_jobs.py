@@ -73,6 +73,18 @@ class MemoryJobTests(unittest.TestCase):
         self.db.expire_all()
         self.assertEqual(self.db.get(MemoryIngestion, first).status, "completed")
 
+    def test_semantic_action_is_normalized_for_memory_but_raw_message_is_preserved(self):
+        assistant = self.db.get(Message, self.scope["assistant_message_id"])
+        assistant.content = "Hello. <action>lowers his head</action>"
+        self.db.commit()
+        operation_id = self.ingestion()
+        with patch.object(memory_service, "_provider_record_completed_turn") as provider:
+            self.assertEqual(memory_jobs.process_ingestion(operation_id), "done")
+        self.assertEqual(provider.call_args.kwargs["assistant_message"],
+                         "Hello. [Character action: lowers his head]")
+        self.db.expire_all()
+        self.assertIn("<action>", self.db.get(Message, assistant.id).content)
+
     def test_stale_lease_reclaim_and_live_lease_exclusion(self):
         operation_id = self.ingestion()
         row = self.db.get(MemoryIngestion, operation_id)

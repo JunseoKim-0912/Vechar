@@ -436,6 +436,25 @@ textarea {
   white-space: pre-wrap;
 }
 
+.chat-bubble .chat-action {
+  margin: 0.45rem 0;
+  padding: 0.35rem 0.7rem;
+  border-left: 2px solid var(--border);
+  border-radius: 0 6px 6px 0;
+  color: var(--ink-soft);
+  background: var(--surface);
+  font-size: 0.9em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-bubble .chat-dialogue { overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  .chat-bubble { max-width: 90%; }
+}
+
 .chat-sender {
   display: block;
   font-size: 0.75rem;

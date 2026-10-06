@@ -24,6 +24,57 @@ def event(key, age=None, summary="", **kwargs):
 
 
 class TimelineReconciliationTests(unittest.TestCase):
+    def test_linked_act_arrest_trial_prison_is_latest_despite_flashback_and_chunk_order(self):
+        stages = [
+            event("a", summary="Lives with friend", state_changes=TimelineStateChanges(location="friend's home")),
+            event("b", summary="Commits the major act", relative_to="a", relative_order="after",
+                  state_changes=TimelineStateChanges(knowledge=["I committed the major act"])),
+            event("c", summary="Arrested", relative_to="b", relative_order="after"),
+            event("d", summary="Trial", relative_to="c", relative_order="after"),
+            event("e", summary="Imprisoned awaiting final outcome", relative_to="d", relative_order="after",
+                  state_changes=TimelineStateChanges(location="prison")),
+            event("flashback", summary="Earlier school memory", narrative_role="flashback",
+                  relative_to="a", relative_order="before",
+                  state_changes=TimelineStateChanges(location="school")),
+        ]
+        for source_order in (stages, list(reversed(stages))):
+            timeline = reconcile_timeline([], source_order)
+            reference = derive_chat_reference(timeline)
+            self.assertEqual(reference.event_key, "e")
+            self.assertEqual(reference.state.location, "prison")
+            self.assertIn("I committed the major act", reference.state.knowledge)
+            prompt = build_chat_instructions("Ari", CharacterProfileData(
+                timeline=timeline, chat_reference_point=reference), None,
+                correction_prefix="/수정", current_message="Have you done the act?",
+            )
+            self.assertIn("I committed the major act", prompt)
+            self.assertIn("Current location: prison", prompt)
+
+    def test_explicit_final_component_corrects_stale_early_reference_without_source_order(self):
+        stages = [
+            event("early-apartment", summary="Dinner at an apartment", relative_to="early-meeting",
+                  relative_order="after", state_changes=TimelineStateChanges(location="apartment")),
+            event("early-meeting", summary="Met a friend"),
+            event("prison-day", summary="Held in prison", relative_to="final-night",
+                  relative_order="before", state_changes=TimelineStateChanges(location="prison")),
+            event("final-night", summary="Final living night in prison", relative_to="prison-day",
+                  relative_order="after", state_changes=TimelineStateChanges(location="cell")),
+        ]
+        # Relative links are one-way in evidence but graph propagation is bidirectional.
+        stages[2].relative_to = None
+        stages[2].relative_order = "unknown"
+        timeline = reconcile_timeline([], list(reversed(stages)))
+        old = derive_chat_reference(reconcile_timeline([], stages[:2]))
+        profile = CharacterProfileData(timeline=timeline, chat_reference_point=old,
+                                       background_facts=["He committed the major act before imprisonment"])
+        reference = derive_chat_reference(timeline, old)
+        self.assertEqual(reference.event_key, "final-night")
+        prompt = build_chat_instructions("Ari", profile, None, correction_prefix="/수정",
+                                         current_message="Have you committed the act?")
+        self.assertIn("Current location: cell", prompt)
+        self.assertIn("He committed the major act", prompt)
+        self.assertNotIn("Current location: apartment", prompt)
+
     def test_flashback_and_out_of_order_ingestion_do_not_reset_age_or_state(self):
         timeline = reconcile_timeline([], [
             event("current", 21, "Now a guard", state_changes=TimelineStateChanges(
@@ -304,7 +355,7 @@ class TimelineProfileServiceTests(unittest.TestCase):
         self.db.commit()
         extracted = CharacterProfileData(timeline=[event("guard", 21, "Ari joins the guard")])
         with patch.object(worlds_router, "extract_character_from_world_text", return_value=extracted), \
-             patch.object(worlds_router, "get_limits", return_value={"max_characters": 100}):
+             patch.object(worlds_router, "check_entity_capacity"):
             character = worlds_router.extract_character_from_world(
                 world.id, ExtractCharacterFromWorldRequest(name="Ari"),
                 user_id=self.user_id, db=self.db,

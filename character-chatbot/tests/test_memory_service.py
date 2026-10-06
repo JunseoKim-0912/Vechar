@@ -78,7 +78,8 @@ class MemoryServiceTests(unittest.TestCase):
 
         response, generation = self._send()
         expected_instructions = build_chat_instructions(
-            "기억 테스트 인물", CharacterProfileData(), None, correction_prefix="/수정"
+            "기억 테스트 인물", CharacterProfileData(), None, correction_prefix="/수정",
+            current_message="안녕",
         )
         expected_budget = select_chat_context(
             expected_instructions, [], "안녕", count_input_tokens=fake_count

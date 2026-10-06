@@ -12,13 +12,16 @@ FOCUSED_EXTRACTION_SYSTEM_PROMPT = """당신은 캐릭터 분석가입니다. �
 chat_reference_point는 서버가 timeline에서 계산하므로 null로 반환하세요.
 Do not treat narrative order as chronological order. Separate flashbacks, recollections, dreams, forecasts,
 and current-time events. A flashback age/state must not replace the latest living canonical state.
+Link successive major canonical events with relative_to/relative_order even without dates;
+include consequential acts and later consequences as distinct timeline events.
 
 지목된 인물에 대한 근거를 텍스트에서 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요."""
 
 FOCUSED_EXTRACTION_SYSTEM_PROMPT += """
 
 Language policy:
-- Understand English, Korean, and mixed English/Korean text, including facts split across languages.
+- Understand arbitrary valid UTF-8 text in model-supported languages, including facts split across languages.
+- Source language must not dictate the eventual chat response language.
 - This creates a new canonical profile, so use the source material's natural dominant language and style while incorporating evidence from every language present.
 - Preserve proper names and fictional terms as written. Do not translate names merely to match the output language.
 - Keep sample_dialogues in their original quotation language."""

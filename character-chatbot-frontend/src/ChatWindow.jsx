@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { API_BASE_URL } from "./api";
 import { useLocale } from "./context/LocaleContext";
+import { ChatMessageContent } from "./chatActions";
 
 export default function ChatWindow({ token, conversationId }) {
   const { locale, t } = useLocale();
@@ -34,10 +35,10 @@ export default function ChatWindow({ token, conversationId }) {
     <div>
       <div>
         {messages.map((m, i) => (
-          <p key={i} style={{ fontStyle: m.role === "SYSTEM_NOTE" ? "italic" : "normal" }}>
+          <div key={i} className="chat-bubble" style={{ fontStyle: m.role === "SYSTEM_NOTE" ? "italic" : "normal" }}>
             <strong>{m.role === "USER" ? t("chat.me") : m.role === "SYSTEM_NOTE" ? t("chat.system") : t("chat.characterFallback")}:</strong>{" "}
-            {m.content}
-          </p>
+            <ChatMessageContent role={m.role} content={m.content} />
+          </div>
         ))}
       </div>
       <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} />

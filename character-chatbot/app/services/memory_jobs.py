@@ -12,6 +12,7 @@ from ..database import SessionLocal
 from ..memory_config import MemoryConfigurationError
 from ..models import Character, Conversation, MemoryDeletion, MemoryIngestion, Message, MessageRole
 from . import memory_service
+from .chat_actions import normalize_assistant_actions
 from .training_queue import MEMORY_DELETE_TOPIC, MEMORY_INGEST_TOPIC, publish_memory_operation
 
 logger = logging.getLogger(__name__)
@@ -178,7 +179,8 @@ def process_ingestion(operation_id: str) -> str:
         scope = dict(user_id=row.user_id, character_id=row.character_id,
                      conversation_id=row.conversation_id, user_message_id=row.user_message_id,
                      assistant_message_id=row.assistant_message_id,
-                     user_message=user_turn.content, assistant_message=assistant_turn.content)
+                     user_message=user_turn.content,
+                     assistant_message=normalize_assistant_actions(assistant_turn.content))
     try:
         memory_service._provider_record_completed_turn(**scope)
     except Exception as exc:

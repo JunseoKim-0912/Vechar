@@ -22,7 +22,7 @@ from ..services.world_profile_service import get_or_create_default_world
 from ..services import memory_jobs
 from ..services.training_queue import MEMORY_DELETE_TOPIC
 from ..ownership import get_owned_world
-from ..tier_limits import get_limits, check_and_log_export, check_import_quota, log_import
+from ..tier_limits import check_entity_capacity, check_and_log_export, check_import_quota, log_import
 
 router = APIRouter()
 
@@ -34,12 +34,7 @@ def create_character(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    limits = get_limits(db, user_id)
-    count = db.query(Character).filter(Character.user_id == user_id).count()
-    if count >= limits["max_characters"]:
-        raise HTTPException(
-            status_code=403, detail=f"계정당 최대 {limits['max_characters']}개까지만 캐릭터를 만들 수 있습니다."
-        )
+    check_entity_capacity(db, user_id, "character")
 
     world_id = payload.world_id
     if world_id is None:
@@ -68,12 +63,7 @@ def import_character(
 
     check_import_quota(db, user_id)
 
-    limits = get_limits(db, user_id)
-    count = db.query(Character).filter(Character.user_id == user_id).count()
-    if count >= limits["max_characters"]:
-        raise HTTPException(
-            status_code=403, detail=f"계정당 최대 {limits['max_characters']}개까지만 캐릭터를 만들 수 있습니다."
-        )
+    check_entity_capacity(db, user_id, "character")
 
     character = Character(user_id=user_id, name=payload.name)
     db.add(character)

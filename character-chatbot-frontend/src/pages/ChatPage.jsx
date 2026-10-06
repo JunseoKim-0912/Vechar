@@ -3,6 +3,7 @@ import { useParams, useLocation, Link } from "react-router-dom";
 import { api } from "../api";
 import { useLocale } from "../context/LocaleContext";
 import { localizeError } from "../i18n/errors";
+import { ChatMessageContent } from "../chatActions";
 
 export default function ChatPage() {
   const { locale, t } = useLocale();
@@ -76,7 +77,7 @@ export default function ChatPage() {
             {m.role !== "SYSTEM_NOTE" && (
               <span className="chat-sender">{m.role === "USER" ? t("chat.me") : character?.name}</span>
             )}
-            <p>{m.content}</p>
+            <ChatMessageContent role={m.role} content={m.content} />
           </div>
         ))}
         <div ref={bottomRef} />

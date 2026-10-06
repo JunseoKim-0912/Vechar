@@ -31,8 +31,10 @@ def issue_token(user_id: str) -> str:
 # 프로토타입용 JWT 인증. 나중에 실제 인증 서비스로 바꿔도 라우트 코드는
 # get_current_user_id에만 의존하므로 다른 곳을 안 건드려도 됩니다.
 def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    from .services.chat_latency import stage
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload["user_id"]
+        with stage("auth_lookup"):
+            payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            return payload["user_id"]
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")

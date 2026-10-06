@@ -181,9 +181,22 @@ def lived_events_before_reference(
     boundary = positions.get(_key(reference.event_key or ""))
     if boundary is None:
         return []
-    return [event for event in actual if not event.is_death
+    lived = [event for event in actual if not event.is_death
             and (position := positions.get(_key(event.event_key))) is not None
             and position[0] == boundary[0] and position[1] <= boundary[1]]
+    return sorted(lived, key=lambda event: positions[_key(event.event_key)][1])
+
+
+def _terminal_evidence(event: TimelineEvent) -> bool:
+    """A narrow, explicit end-of-story cue; source/chunk order is never evidence."""
+    if event.narrative_role != "main":
+        return False
+    label = " ".join((event.event_key, event.time_label, event.relative_label or "")).casefold()
+    return bool(re.search(
+        r"(?:final|last)[-_ ](?:night|day|moment|scene|chapter|state)|"
+        r"end[-_ ]of[-_ ](?:story|novel|life)|마지막[-_ ]?(?:밤|날|순간|장면)|최후",
+        label,
+    ))
 
 
 def reconcile_timeline(
@@ -256,7 +269,13 @@ def derive_chat_reference(
     positions = _positions(actual)
     deaths = [event for event in actual if event.is_death]
     if deaths:
-        boundary = deaths[0]
+        death_families = {positions[_key(event.event_key)][0] for event in deaths
+                          if positions.get(_key(event.event_key)) is not None}
+        if len(death_families) > 1:
+            return ChatReferencePoint(status="unknown", summary="Canonical death chronology unresolved",
+                                      reason="Incomparable death boundaries")
+        # An explicit death is the cutoff, regardless of its source chunk.
+        boundary = max(deaths, key=lambda event: (positions.get(_key(event.event_key)) or ("", -1))[1])
         phase = "immediately_before_death"
         status = "deceased_in_canon"
     else:
@@ -266,20 +285,37 @@ def derive_chat_reference(
                 status="unknown", summary="Canonical chronology unresolved",
                 reason="No dated or relative evidence establishes the latest living state",
             )
-        previous_event = next((event for event in actual if previous and event.event_key == previous.event_key), None)
-        if previous_event and positions.get(previous_event.event_key) is not None:
-            family = positions[previous_event.event_key][0]
-            comparable = [event for event in evidenced if positions[event.event_key][0] == family]
-            boundary = comparable[-1]
+        families = {positions[_key(event.event_key)][0] for event in evidenced}
+        terminal = [event for event in evidenced if _terminal_evidence(event)]
+        if len(families) > 1 and terminal:
+            terminal_families = {positions[_key(event.event_key)][0] for event in terminal}
+            if len(terminal_families) == 1:
+                family = next(iter(terminal_families))
+                comparable = [event for event in evidenced if positions[_key(event.event_key)][0] == family]
+            else:
+                comparable = []
+        elif len(families) == 1:
+            comparable = evidenced
         else:
-            anchored = [event for event in evidenced if positions[event.event_key][0] == "age"]
-            boundary = (anchored or evidenced)[-1]
+            # Incomparable undated components have no defensible latest event.
+            return ChatReferencePoint(status="unknown", summary="Canonical chronology unresolved",
+                                      reason="Disconnected event chronologies have no unique final state")
+        if not comparable:
+            return ChatReferencePoint(status="unknown", summary="Canonical chronology unresolved",
+                                      reason="Conflicting final-state evidence")
+        boundary = max(comparable, key=lambda event: positions[_key(event.event_key)][1])
         phase = "at_event"
         status = "alive" if evidenced else "unknown"
 
     boundary_position = positions.get(boundary.event_key)
     state = CanonicalCharacterState()
-    for event in actual:
+    comparable_events = sorted(
+        (event for event in actual if positions.get(_key(event.event_key)) is not None
+         and boundary_position is not None
+         and positions[_key(event.event_key)][0] == boundary_position[0]),
+        key=lambda event: positions[_key(event.event_key)][1],
+    )
+    for event in comparable_events:
         if event.event_key == boundary.event_key and phase == "immediately_before_death":
             break
         position = positions.get(event.event_key)

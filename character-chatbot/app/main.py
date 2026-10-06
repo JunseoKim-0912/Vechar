@@ -10,8 +10,24 @@ from .routers import chat_router
 from .routers import worlds_router
 from .routers import training_jobs_router
 from .routers import memory_ops_router
+from .services.chat_latency import start_chat_latency, end_chat_latency
 
 app = FastAPI(title="Character Chatbot API")
+
+
+@app.middleware("http")
+async def chat_latency_middleware(request, call_next):
+    if request.method != "POST" or not request.url.path.startswith("/chat/conversations/") or not request.url.path.endswith("/messages"):
+        return await call_next(request)
+    tracker, token = start_chat_latency()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        tracker.finish(status_code)
+        end_chat_latency(token)
 
 raw_cors_origins = os.getenv("CORS_ORIGINS")
 if raw_cors_origins is None:

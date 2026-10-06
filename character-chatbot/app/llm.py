@@ -211,7 +211,11 @@ def _generate_response(
         }
         if text_config:
             create_args["text"] = text_config
-        response = client.responses.create(**create_args)
+        from .services.chat_latency import provider_started, provider_completed, stage
+        provider_started()
+        with stage("provider_request"):
+            response = client.responses.create(**create_args)
+        provider_completed()
     except APIStatusError as exc:
         record_failure(bind, usage_id, type(exc).__name__,
                        definitely_unbilled=400 <= exc.status_code < 500,

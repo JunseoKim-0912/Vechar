@@ -30,11 +30,16 @@ Prophecies, dreams, hypotheticals, and post-death events are not the character's
 If a post-death event shares the death age/year, link it to the death event with relative_to and
 relative_order="after" so it cannot enter the final living state.
 For relative expressions such as three years later, preserve the relation (+36 months) without inventing a year.
+Link successive major canonical events with relative_to/relative_order even without numeric dates.
+Use an existing canonical event_key when the supplied profile establishes that relation; do not
+infer chronology from chunk index or paragraph order alone. Include consequential acts and
+their later consequences (arrest, trial, imprisonment) as distinct events and knowledge changes.
 
 텍스트에서 근거를 찾을 수 없는 필드는 빈 문자열이나 빈 배열로 두세요.
 
 Language policy:
-- Understand English, Korean, and mixed English/Korean source text; extract evidence from every language present.
+- Understand arbitrary valid UTF-8 source text in model-supported languages; extract evidence from every language present.
+- Source language is not a requirement for the eventual chat response language.
 - For a new profile, write the profile in the source's natural dominant language and style. For a genuinely mixed source, choose a coherent dominant language without dropping facts from the other language.
 - If an existing canonical profile is supplied as a language reference, write new profile fields in that profile's dominant language and style even when the new source uses another language.
 - Preserve proper names, place names, organizations, fictional terms, and unique objects as written; prefer an established spelling from the canonical profile when available.

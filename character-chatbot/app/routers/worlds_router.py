@@ -28,7 +28,7 @@ from ..services.world_profile_service import (
 from ..services.character_extraction_service import extract_character_from_world_text
 from ..services.character_profile_service import set_initial_profile
 from ..training_source import parse_training_request
-from ..tier_limits import get_limits, check_and_log_export, check_import_quota, log_import
+from ..tier_limits import check_entity_capacity, check_and_log_export, check_import_quota, log_import
 from ..schemas import WorldProfileData, MentionedCharacter
 
 router = APIRouter()
@@ -38,10 +38,7 @@ VALID_OPERATIONS = {"add", "delete", "modify"}
 
 @router.post("/", response_model=WorldRead, status_code=201)
 def create_world(payload: WorldCreateRequest, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    limits = get_limits(db, user_id)
-    count = db.query(World).filter(World.user_id == user_id).count()
-    if count >= limits["max_worlds"]:
-        raise HTTPException(status_code=403, detail=f"계정당 최대 {limits['max_worlds']}개까지만 세계관을 만들 수 있습니다.")
+    check_entity_capacity(db, user_id, "world")
 
     world = World(user_id=user_id, name=payload.name)
     db.add(world)
@@ -62,10 +59,7 @@ def import_world(
 
     check_import_quota(db, user_id)
 
-    limits = get_limits(db, user_id)
-    count = db.query(World).filter(World.user_id == user_id).count()
-    if count >= limits["max_worlds"]:
-        raise HTTPException(status_code=403, detail=f"계정당 최대 {limits['max_worlds']}개까지만 세계관을 만들 수 있습니다.")
+    check_entity_capacity(db, user_id, "world")
 
     world = World(user_id=user_id, name=payload.name)
     db.add(world)
@@ -218,10 +212,7 @@ def extract_character_from_world(
     if not world:
         raise HTTPException(status_code=404, detail="World not found")
 
-    limits = get_limits(db, user_id)
-    count = db.query(Character).filter(Character.user_id == user_id).count()
-    if count >= limits["max_characters"]:
-        raise HTTPException(status_code=403, detail=f"계정당 최대 {limits['max_characters']}개까지만 캐릭터를 만들 수 있습니다.")
+    check_entity_capacity(db, user_id, "character")
 
     # mentioned_characters에 저장된 별명이 있으면, 대표 이름뿐 아니라 별명으로 등장한 화도 같이 찾습니다.
     profile_row = get_world_profile(db, world_id)

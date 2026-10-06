@@ -21,14 +21,20 @@ def set_initial_world_profile(db: Session, world_id: str, data: WorldProfileData
 
 def get_or_create_default_world(db: Session, user_id: str) -> World:
     """캐릭터 생성 시 world_id를 안 정해주면, 이 사용자의 "현실" 세계관에 자동 배정."""
+    from ..models import User
+    # Lock before testing existence so concurrent first-character requests
+    # cannot each create a different persisted Reality world.
+    db.query(User.id).filter(User.id == user_id).with_for_update().first()
     world = db.query(World).filter(World.user_id == user_id, World.name == "현실").first()
     if world:
         return world
 
+    from ..tier_limits import check_entity_capacity
+    check_entity_capacity(db, user_id, "world")
+
     world = World(user_id=user_id, name="현실")
     db.add(world)
-    db.commit()
-    db.refresh(world)
+    db.flush()
 
     db.add(
         WorldProfile(
@@ -38,6 +44,7 @@ def get_or_create_default_world(db: Session, user_id: str) -> World:
         )
     )
     db.commit()
+    db.refresh(world)
     return world
 
 
@@ -101,7 +108,7 @@ name은 그중 가장 널리 알려진 대표 이름 하나로 정하세요.
 반드시 아래 JSON으로만 응답하세요. 다른 텍스트 없이 순수 JSON만 출력합니다.
 {"mentioned_characters": [{"name": "...", "aliases": ["..."]}, ...]}
 
-Understand English, Korean, and mixed-language entries. Prefer spellings already present in the earlier canonical entries, and never translate proper names merely to match an output language."""
+Understand entries in any model-supported language. Prefer spellings already present in the earlier canonical entries, and never translate proper names merely to match an output language."""
 
 
 def _rank_and_dedupe_characters(
@@ -131,7 +138,7 @@ WORLD_SYNTHESIS_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. 기�
 반드시 아래 JSON으로만 응답하세요. 다른 텍스트 없이 순수 JSON만 출력합니다.
 {"world_summary": "..."}
 
-The existing summary is canonical. Preserve its dominant language, register, and style while understanding English, Korean, or mixed-language new information. Preserve established proper-name and fictional-term spellings, and avoid an accidental bilingual patchwork."""
+The existing summary is canonical. Preserve its dominant language, register, and style while understanding new information in any model-supported language. Preserve established proper-name and fictional-term spellings, and avoid an accidental bilingual patchwork."""
 def merge_world_source(
     db: Session, user_id: str, world_id: str, newly_extracted: WorldProfileData,
     synthesized_summary: WorldSynthesisResult | None = None,
@@ -205,7 +212,7 @@ WORLD_EDIT_JSON_SPEC = """
   "mentioned_characters": [{"name": "...", "aliases": ["..."]}]
 }
 
-Language policy: understand English, Korean, or mixed-language instructions; keep the existing canonical world's dominant language and style unless the user explicitly requests a language/style change; preserve established proper-name spellings."""
+Language policy: understand instructions in any model-supported language; keep the existing canonical world's dominant language and style unless the user explicitly requests a language/style change; preserve established proper-name spellings."""
 
 
 def apply_world_edit(db: Session, user_id: str, world_id: str, operation: str, instruction: str) -> WorldProfile:
@@ -278,7 +285,7 @@ COMPACT_SYSTEM_PROMPT = """당신은 세계관 편집자입니다. key_facts와 
   "mentioned_characters": [{"name": "...", "aliases": ["..."]}]
 }
 
-Understand English, Korean, and mixed-language content. Keep the existing canonical profile's dominant language and style, preserve established proper names and fictional terms, and do not create a bilingual patchwork while compacting."""
+Understand content in any model-supported language. Keep the existing canonical profile's dominant language and style, preserve established proper names and fictional terms, and do not create a bilingual patchwork while compacting."""
 
 
 def compact_world_profile(db: Session, user_id: str, world_id: str) -> WorldProfile:
