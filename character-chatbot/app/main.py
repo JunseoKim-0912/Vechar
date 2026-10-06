@@ -10,6 +10,7 @@ from .routers import chat_router
 from .routers import worlds_router
 from .routers import training_jobs_router
 from .routers import memory_ops_router
+from .routers import character_conversations_router
 from .services.chat_latency import start_chat_latency, end_chat_latency
 
 app = FastAPI(title="Character Chatbot API")
@@ -17,7 +18,11 @@ app = FastAPI(title="Character Chatbot API")
 
 @app.middleware("http")
 async def chat_latency_middleware(request, call_next):
-    if request.method != "POST" or not request.url.path.startswith("/chat/conversations/") or not request.url.path.endswith("/messages"):
+    user_chat = (request.method == "POST" and request.url.path.startswith("/chat/conversations/")
+                 and request.url.path.endswith("/messages"))
+    room_next = (request.method == "POST" and request.url.path.startswith("/character-conversations/")
+                 and request.url.path.endswith("/next"))
+    if not user_chat and not room_next:
         return await call_next(request)
     tracker, token = start_chat_latency()
     status_code = 500
@@ -72,6 +77,8 @@ app.include_router(auth_router.router, prefix="/auth", tags=["auth"])
 app.include_router(characters_router.router, prefix="/characters", tags=["characters"])
 app.include_router(upload_router.router, prefix="/upload", tags=["upload"])
 app.include_router(chat_router.router, prefix="/chat", tags=["chat"])
+app.include_router(character_conversations_router.router,
+                   prefix="/character-conversations", tags=["character-conversations"])
 app.include_router(worlds_router.router, prefix="/worlds", tags=["worlds"])
 app.include_router(training_jobs_router.router, prefix="/training-jobs", tags=["training-jobs"])
 app.include_router(memory_ops_router.router, prefix="/internal/memory", tags=["internal"])

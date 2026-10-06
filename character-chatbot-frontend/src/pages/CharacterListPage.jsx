@@ -3,10 +3,19 @@ import { Link } from "react-router-dom";
 import { api, apiAssetUrl } from "../api";
 import { useLocale } from "../context/LocaleContext";
 import { localizeError } from "../i18n/errors";
+import { DualAvatar, roomCreatePayload } from "../characterConversationUi";
 
 export default function CharacterListPage() {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const [characters, setCharacters] = useState(null);
+  const [rooms, setRooms] = useState([]);
+  const [showRoomForm, setShowRoomForm] = useState(false);
+  const [firstId, setFirstId] = useState("");
+  const [secondId, setSecondId] = useState("");
+  const [roomName, setRoomName] = useState("");
+  const [roomLanguage, setRoomLanguage] = useState(locale);
+  const [creatingRoom, setCreatingRoom] = useState(false);
+  const [roomError, setRoomError] = useState("");
   const [error, setError] = useState("");
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState("");
@@ -15,7 +24,11 @@ export default function CharacterListPage() {
 
   async function load() {
     try {
-      setCharacters(await api.get("/characters/"));
+      const [ownedCharacters, ownedRooms] = await Promise.all([
+        api.get("/characters/"), api.get("/character-conversations"),
+      ]);
+      setCharacters(ownedCharacters);
+      setRooms(ownedRooms);
     } catch (e) {
       setError(localizeError(e, t));
     }
@@ -29,9 +42,42 @@ export default function CharacterListPage() {
     if (!confirm(t("characters.confirmDelete"))) return;
     try {
       await api.delete(`/characters/${id}`);
-      setCharacters((prev) => prev.filter((c) => c.id !== id));
+      await load();
     } catch (e) {
       alert(localizeError(e, t));
+    }
+  }
+
+  async function handleCreateRoom(event) {
+    event.preventDefault();
+    setRoomError("");
+    let payload;
+    try {
+      payload = roomCreatePayload(firstId, secondId, roomName, roomLanguage);
+    } catch (error) {
+      setRoomError(t(`characterConversations.${error.message}`));
+      return;
+    }
+    setCreatingRoom(true);
+    try {
+      const room = await api.post("/character-conversations", payload);
+      setRooms((previous) => [room, ...previous]);
+      setShowRoomForm(false);
+      setFirstId(""); setSecondId(""); setRoomName("");
+    } catch (error) {
+      setRoomError(localizeError(error, t));
+    } finally {
+      setCreatingRoom(false);
+    }
+  }
+
+  async function handleDeleteRoom(roomId) {
+    if (!confirm(t("characterConversations.confirmDelete"))) return;
+    try {
+      await api.delete(`/character-conversations/${roomId}`);
+      setRooms((previous) => previous.filter((room) => room.id !== roomId));
+    } catch (error) {
+      setRoomError(localizeError(error, t));
     }
   }
 
@@ -103,6 +149,60 @@ export default function CharacterListPage() {
           </div>
         ))}
       </div>
+
+      <section className="conversation-section" aria-labelledby="character-conversations-title">
+        <div className="page-header">
+          <h2 id="character-conversations-title">{t("characterConversations.title")}</h2>
+          <button type="button" onClick={() => {
+            setRoomLanguage(locale);
+            setShowRoomForm((shown) => !shown);
+          }} disabled={characters.length < 2}>{t("characterConversations.new")}</button>
+        </div>
+        {roomError && <p className="form-error" role="alert">{roomError}</p>}
+        {showRoomForm && (
+          <form className="room-create-form" onSubmit={handleCreateRoom}>
+            <label>{t("characterConversations.first")}
+              <select value={firstId} onChange={(event) => setFirstId(event.target.value)} required>
+                <option value="">{t("characterConversations.choose")}</option>
+                {characters.map((character) => <option value={character.id} key={character.id}>{character.name}</option>)}
+              </select>
+            </label>
+            <label>{t("characterConversations.second")}
+              <select value={secondId} onChange={(event) => setSecondId(event.target.value)} required>
+                <option value="">{t("characterConversations.choose")}</option>
+                {characters.filter((character) => character.id !== firstId).map((character) =>
+                  <option value={character.id} key={character.id}>{character.name}</option>)}
+              </select>
+            </label>
+            <label>{t("characterConversations.name")}
+              <input value={roomName} onChange={(event) => setRoomName(event.target.value)} maxLength={120} required />
+            </label>
+            <label>{t("characterConversations.language")}
+              <select value={roomLanguage} onChange={(event) => setRoomLanguage(event.target.value)}>
+                <option value="en">{t("locale.english")}</option>
+                <option value="ko">{t("locale.korean")}</option>
+              </select>
+            </label>
+            <button className="btn-primary" type="submit" disabled={creatingRoom}>
+              {creatingRoom ? t("common.creating") : t("common.create")}
+            </button>
+          </form>
+        )}
+        {rooms.length === 0 && <p className="empty-state">{t("characterConversations.empty")}</p>}
+        <div className="room-card-grid">
+          {rooms.map((room) => <div className="room-card" key={room.id}>
+            <DualAvatar participants={room.participants} assetUrl={apiAssetUrl} />
+            <div className="room-card-copy">
+              <h3>{room.name}</h3>
+              <p>{room.participants.map((person) => person.name).join(" · ")}</p>
+            </div>
+            <div className="entity-card-actions">
+              <Link to={`/character-conversations/${room.id}`}>{t("characterConversations.continue")}</Link>
+              <button className="link-danger" onClick={() => handleDeleteRoom(room.id)}>{t("common.delete")}</button>
+            </div>
+          </div>)}
+        </div>
+      </section>
     </div>
   );
 }

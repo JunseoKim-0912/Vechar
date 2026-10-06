@@ -51,7 +51,7 @@ class LocalPostgresTrainingMigrationTests(unittest.TestCase):
                         "password_hash": "unused", "premium": premium})
                 connection.commit()
                 command.upgrade(config, "head")
-                self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0006_adaptive_training_chunks")
+                self.assertEqual(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one(), "0007_character_conversations")
                 self.assertTrue({"training_jobs", "training_job_chunks", "memory_ingestions",
                                  "memory_deletions"} <= set(inspect(connection).get_table_names()))
                 self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])

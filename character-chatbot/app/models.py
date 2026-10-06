@@ -82,7 +82,8 @@ class Character(Base):
         "CharacterProfile", back_populates="character", uselist=False, cascade="all, delete-orphan"
     )
     training_sources = relationship("TrainingSource", back_populates="character", cascade="all, delete-orphan")
-    conversations = relationship("Conversation", back_populates="character", cascade="all, delete-orphan")
+    conversations = relationship("Conversation", back_populates="character", cascade="all, delete-orphan",
+                                 foreign_keys="Conversation.character_id")
     correction_logs = relationship("CorrectionLog", back_populates="character", cascade="all, delete-orphan")
 
 
@@ -140,20 +141,44 @@ class TrainingSource(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        CheckConstraint("kind IN ('user_character', 'character_pair')", name="ck_conversations_kind"),
+        CheckConstraint("language IN ('en', 'ko')", name="ck_conversations_language"),
+        CheckConstraint("turn_index >= 0", name="ck_conversations_turn_index"),
+        CheckConstraint(
+            "(kind = 'user_character' AND secondary_character_id IS NULL) OR "
+            "(kind = 'character_pair' AND secondary_character_id IS NOT NULL "
+            "AND character_id <> secondary_character_id AND name IS NOT NULL AND trim(name) <> '')",
+            name="ck_conversations_shape",
+        ),
+    )
     id = Column(String, primary_key=True, default=gen_uuid)
     character_id = Column(String, ForeignKey("characters.id", ondelete="CASCADE"), nullable=False, index=True)
+    secondary_character_id = Column(String, ForeignKey("characters.id", ondelete="CASCADE"), nullable=True, index=True)
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String(20), nullable=False, default="user_character", server_default=text("'user_character'"))
+    name = Column(String(120), nullable=True)
+    language = Column(String(2), nullable=False, default="en", server_default=text("'en'"))
+    turn_index = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    generation_token = Column(String(36), nullable=True)
+    generation_lease_expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow,
+                        server_default=text("CURRENT_TIMESTAMP"))
 
-    character = relationship("Character", back_populates="conversations")
+    character = relationship("Character", back_populates="conversations", foreign_keys=[character_id])
+    secondary_character = relationship("Character", foreign_keys=[secondary_character_id])
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
 
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (UniqueConstraint("conversation_id", "turn_index", name="uq_messages_conversation_turn"),)
     id = Column(String, primary_key=True, default=gen_uuid)
     conversation_id = Column(String, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     role = Column(SAEnum(MessageRole), nullable=False)
+    speaker_character_id = Column(String, ForeignKey("characters.id", ondelete="SET NULL"), nullable=True)
+    turn_index = Column(Integer, nullable=True)
     content = Column(Text, nullable=False)
     is_correction_cmd = Column(Boolean, default=False)
     created_at = Column(DateTime, default=utcnow)

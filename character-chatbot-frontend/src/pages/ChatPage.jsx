@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useLocale } from "../context/LocaleContext";
 import { localizeError } from "../i18n/errors";
 import { ChatMessageContent } from "../chatActions";
+import { resumeCharacterChat } from "../chatSessions";
 
 export default function ChatPage() {
   const { locale, t } = useLocale();
@@ -32,7 +33,7 @@ export default function ChatPage() {
         }
         return;
       }
-      const conv = await api.post("/chat/conversations", { character_id: characterId });
+      const conv = await resumeCharacterChat(api, characterId);
       setConversationId(conv.id);
     }
     ensureConversation().catch((e) => setError(localizeError(e, t)));

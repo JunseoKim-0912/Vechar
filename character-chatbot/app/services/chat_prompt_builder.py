@@ -65,6 +65,7 @@ def build_chat_instructions(
     locale: str = "en",
     current_message: str = "",
     recent_messages: Sequence[tuple[MessageRole, str]] = (),
+    response_language_override: str | None = None,
 ) -> str:
     # Existing persisted profiles may carry an older, order-dependent reference.
     # Re-derive without mutating the profile or production DB.
@@ -97,7 +98,7 @@ def build_chat_instructions(
 세계관 개요: {world.world_summary or "(설명 없음)"}
 세계관 사실: {world_facts}"""
 
-    language = response_language(current_message, recent_messages, locale)
+    language = response_language_override or response_language(current_message, recent_messages, locale)
 
     return f"""당신은 지금부터 "{character_name}"라는 캐릭터를 연기합니다.
 

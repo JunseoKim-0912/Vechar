@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from ..database import get_db
 from ..auth import get_current_user_id
-from ..models import Character, CharacterProfileHistory, SourceType, ChangeReason
+from ..models import Character, CharacterProfileHistory, Conversation, SourceType, ChangeReason
 from ..schemas import (
     CharacterCreateRequest,
     CharacterRead,
@@ -125,6 +126,16 @@ def delete_character(character_id: str, user_id: str = Depends(get_current_user_
     deletion = memory_jobs.schedule_character_deletion(
         db, user_id=user_id, character_id=character_id,
     )
+    # A two-character room is deleted with either participant. PostgreSQL FK
+    # cascades are a backstop for non-HTTP deletions; this covers the route and
+    # keeps SQLite/test behavior explicit too.
+    rooms = db.query(Conversation).filter(
+        Conversation.user_id == user_id, Conversation.kind == "character_pair",
+        or_(Conversation.character_id == character_id,
+            Conversation.secondary_character_id == character_id),
+    ).all()
+    for room in rooms:
+        db.delete(room)
     db.delete(character)  # cascades to profile, training_sources, conversations, correction_logs (see models.py)
     db.commit()
     memory_jobs.publish_safe(MEMORY_DELETE_TOPIC, deletion.id if deletion else None)

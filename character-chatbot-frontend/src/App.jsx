@@ -8,6 +8,7 @@ import CharacterListPage from "./pages/CharacterListPage";
 import CharacterCreatePage from "./pages/CharacterCreatePage";
 import CharacterDetailPage from "./pages/CharacterDetailPage";
 import ChatPage from "./pages/ChatPage";
+import CharacterConversationPage from "./pages/CharacterConversationPage";
 import WorldListPage from "./pages/WorldListPage";
 import WorldDetailPage from "./pages/WorldDetailPage";
 import { useLocale } from "./context/LocaleContext";
@@ -32,6 +33,7 @@ export default function App() {
               <Route path="/characters/new" element={<CharacterCreatePage />} />
               <Route path="/characters/:id" element={<CharacterDetailPage />} />
               <Route path="/chat/:characterId" element={<ChatPage />} />
+              <Route path="/character-conversations/:roomId" element={<CharacterConversationPage />} />
               <Route path="/worlds" element={<WorldListPage />} />
               <Route path="/worlds/:id" element={<WorldDetailPage />} />
             </Route>

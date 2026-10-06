@@ -2,13 +2,28 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user_id
-from ..models import Character, Conversation, Message
+from ..models import Character, Conversation, Message, User
 from ..ownership import get_owned_world
 from ..schemas import MessageCreateRequest, MessageRead, ConversationCreateRequest
 from ..services.chat_service import send_message
 from ..services.chat_latency import stage
 
 router = APIRouter()
+
+
+@router.get("/characters/{character_id}/conversations")
+def list_character_conversations(
+    character_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db),
+):
+    character = db.query(Character.id).filter(Character.id == character_id,
+                                              Character.user_id == user_id).first()
+    if not character:
+        raise HTTPException(status_code=404, detail="Character not found")
+    rows = (db.query(Conversation)
+            .filter(Conversation.user_id == user_id, Conversation.character_id == character_id,
+                    Conversation.kind == "user_character")
+            .order_by(Conversation.created_at.desc(), Conversation.id.desc()).all())
+    return [{"id": row.id, "character_id": row.character_id, "created_at": row.created_at} for row in rows]
 
 
 @router.post("/conversations", status_code=201)
@@ -27,6 +42,20 @@ def create_conversation(
     if character.world_id:
         get_owned_world(db, character.world_id, user_id)
 
+    if payload.reuse_existing:
+        # Backend-owned get-or-create survives refresh, remount and new processes.
+        # The user row lock prevents duplicate initial sessions under concurrent mounts.
+        db.query(User.id).filter(User.id == user_id).with_for_update().first()
+        existing = (db.query(Conversation)
+                    .filter(Conversation.user_id == user_id,
+                            Conversation.character_id == character.id,
+                            Conversation.kind == "user_character")
+                    .order_by(Conversation.created_at.desc(), Conversation.id.desc()).first())
+        if existing:
+            result = {"id": existing.id, "character_id": existing.character_id}
+            db.commit()
+            return result
+
     conversation = Conversation(character_id=character.id, user_id=user_id)
     db.add(conversation)
     db.commit()
@@ -39,7 +68,8 @@ def get_messages(conversation_id: str, user_id: str = Depends(get_current_user_i
     conversation = (
         db.query(Conversation)
         .join(Character, Conversation.character_id == Character.id)
-        .filter(Conversation.id == conversation_id, Conversation.user_id == user_id, Character.user_id == user_id)
+        .filter(Conversation.id == conversation_id, Conversation.user_id == user_id,
+                Conversation.kind == "user_character", Character.user_id == user_id)
         .first()
     )
     if not conversation:
@@ -48,7 +78,7 @@ def get_messages(conversation_id: str, user_id: str = Depends(get_current_user_i
     return (
         db.query(Message)
         .filter(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.asc())
+        .order_by(Message.created_at.asc(), Message.id.asc())
         .all()
     )
 
@@ -64,7 +94,8 @@ def post_message(
         conversation = (
             db.query(Conversation)
             .join(Character, Conversation.character_id == Character.id)
-            .filter(Conversation.id == conversation_id, Conversation.user_id == user_id, Character.user_id == user_id)
+            .filter(Conversation.id == conversation_id, Conversation.user_id == user_id,
+                    Conversation.kind == "user_character", Character.user_id == user_id)
             .first()
         )
     if not conversation:

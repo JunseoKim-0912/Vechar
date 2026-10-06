@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, downloadJSON } from "../api";
+import { resumeCharacterChat } from "../chatSessions";
 import { useLocale } from "../context/LocaleContext";
 import { localizeError } from "../i18n/errors";
 import { trainingRequestBody } from "../trainingSource";
@@ -86,7 +87,7 @@ export default function CharacterDetailPage() {
 
   async function startChat() {
     try {
-      const conversation = await api.post("/chat/conversations", { character_id: id });
+      const conversation = await resumeCharacterChat(api, id);
       navigate(`/chat/${id}`, { state: { conversationId: conversation.id } });
     } catch (e) {
       alert(localizeError(e, t));

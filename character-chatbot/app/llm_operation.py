@@ -13,11 +13,12 @@ class LLMOperation:
     attempt: int
     chunk_index: int | None = None
     chunk_key: str | None = None
+    operation_type: str = "training"
 
     def key(self, request_type: str) -> str:
         identity = self.chunk_key if self.chunk_key is not None else self.chunk_index
         part = f"chunk:{identity}" if identity is not None else "finalize"
-        return f"training:{self.job_id}:{part}:{self.stage}:{self.attempt}:{request_type}"
+        return f"{self.operation_type}:{self.job_id}:{part}:{self.stage}:{self.attempt}:{request_type}"
 
 
 _current: ContextVar[LLMOperation | None] = ContextVar("llm_operation", default=None)

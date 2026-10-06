@@ -23,7 +23,7 @@ export const translations = {
       name: "Name", image: "Profile Image (optional)", world: "World",
       worldHint: "optional — leave blank to use Reality", reality: "Reality (default)",
       details: "Details", empty: "No characters yet. Create your first character or import one.",
-      confirmDelete: "Delete this character?", startChat: "Start Chat", profile: "Character Profile",
+      confirmDelete: "Delete this character?", startChat: "Open Chat", profile: "Character Profile",
       profileRequired: "Train a profile before exporting this character.", personality: "Personality",
       speechStyle: "Speech Style", background: "Background",
       noTraining: "No training data yet. Add text below to get started.", train: "Train Character",
@@ -48,6 +48,16 @@ export const translations = {
     chat: {
       characterFallback: "Character", me: "You", system: "System", send: "Send",
       placeholder: "Message {name}... (use /수정 to correct the profile)",
+    },
+    characterConversations: {
+      title: "Character Conversations", new: "+ New Conversation", first: "Character A",
+      second: "Character B", choose: "Choose a character", name: "Room name", language: "Room language",
+      continue: "Continue", empty: "No character conversations yet.",
+      confirmDelete: "Delete this conversation and all its messages?", rename: "Rename room",
+      noMessages: "Press Next to begin the conversation.", next: "Next", generating: "Generating…",
+      nextSpeaker: "Next speaker: {name}", turnConflict: "This turn changed elsewhere. The room has been refreshed.",
+      roomParticipantsRequired: "Choose two characters.", roomParticipantsDistinct: "Choose two different characters.",
+      roomNameRequired: "Enter a room name.",
     },
     errors: {
       loginFailed: "The email or password is incorrect.", signupValidation: "Check your email and use a password with at least 8 characters.",
@@ -90,7 +100,7 @@ export const translations = {
       name: "이름", image: "프로필 사진 (선택)", world: "세계관",
       worldHint: "선택 — 비워두면 현실에 배정됩니다", reality: "현실 (기본)",
       details: "자세히", empty: "아직 만든 캐릭터가 없어요. 첫 캐릭터를 만들거나 파일을 가져와보세요.",
-      confirmDelete: "이 캐릭터를 삭제할까요?", startChat: "대화 시작하기", profile: "학습된 프로필",
+      confirmDelete: "이 캐릭터를 삭제할까요?", startChat: "대화 열기", profile: "학습된 프로필",
       profileRequired: "학습된 프로필이 있어야 내보낼 수 있어요.", personality: "성격",
       speechStyle: "말투", background: "배경",
       noTraining: "아직 학습된 내용이 없어요. 아래에서 텍스트를 추가해보세요.", train: "학습시키기",
@@ -115,6 +125,16 @@ export const translations = {
     chat: {
       characterFallback: "캐릭터", me: "나", system: "시스템", send: "보내기",
       placeholder: "{name}에게 말 걸기... (/수정으로 정정 가능)",
+    },
+    characterConversations: {
+      title: "캐릭터 대화방", new: "+ 새 대화방", first: "캐릭터 A",
+      second: "캐릭터 B", choose: "캐릭터 선택", name: "대화방 이름", language: "대화 언어",
+      continue: "이어가기", empty: "아직 캐릭터 대화방이 없어요.",
+      confirmDelete: "이 대화방과 모든 메시지를 삭제할까요?", rename: "대화방 이름 바꾸기",
+      noMessages: "Next를 눌러 대화를 시작하세요.", next: "Next", generating: "생성 중…",
+      nextSpeaker: "다음 화자: {name}", turnConflict: "다른 요청으로 턴이 바뀌어 대화방을 새로 불러왔습니다.",
+      roomParticipantsRequired: "캐릭터 두 명을 선택하세요.", roomParticipantsDistinct: "서로 다른 캐릭터 두 명을 선택하세요.",
+      roomNameRequired: "대화방 이름을 입력하세요.",
     },
     errors: {
       loginFailed: "이메일 또는 비밀번호가 올바르지 않습니다.", signupValidation: "이메일을 확인하고 8자 이상의 비밀번호를 사용해주세요.",

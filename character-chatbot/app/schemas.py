@@ -148,6 +148,7 @@ class MessageCreateRequest(BaseModel):
 
 class ConversationCreateRequest(BaseModel):
     character_id: str
+    reuse_existing: bool = False
 
 
 class MessageRead(BaseModel):
@@ -157,6 +158,46 @@ class MessageRead(BaseModel):
     content: str
     is_correction_cmd: bool
     created_at: datetime
+    speaker_character_id: str | None = None
+    turn_index: int | None = None
+
+
+class CharacterConversationCreateRequest(BaseModel):
+    character_a_id: str
+    character_b_id: str
+    name: str = Field(min_length=1, max_length=120)
+    language: Literal["en", "ko"]
+
+
+class CharacterConversationRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class CharacterConversationNextRequest(BaseModel):
+    expected_turn_index: int = Field(ge=0)
+
+
+class CharacterConversationParticipantRead(BaseModel):
+    id: str
+    name: str
+    profile_image_url: str | None = None
+    position: int
+
+
+class CharacterConversationRead(BaseModel):
+    id: str
+    name: str
+    language: Literal["en", "ko"]
+    participants: list[CharacterConversationParticipantRead]
+    turn_index: int
+    next_speaker_character_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CharacterConversationTurnRead(BaseModel):
+    room: CharacterConversationRead
+    message: MessageRead
 
 
 class RollbackRequest(BaseModel):

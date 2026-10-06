@@ -21,7 +21,7 @@ from app.main import app
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 INI_PATH = BACKEND_ROOT / "alembic.ini"
 INITIAL_REVISION = "0001_initial_schema"
-HEAD_REVISION = "0006_adaptive_training_chunks"
+HEAD_REVISION = "0007_character_conversations"
 
 
 class AlembicFoundationTests(unittest.TestCase):
@@ -36,7 +36,9 @@ class AlembicFoundationTests(unittest.TestCase):
         self.assertEqual(script.get_revision("0002_training_jobs").down_revision, INITIAL_REVISION)
         self.assertEqual(script.get_revision("0003_memory_ingestion").down_revision, "0002_training_jobs")
         self.assertEqual(script.get_revision("0004_user_roles").down_revision, "0003_memory_ingestion")
-        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0005_llm_response_diagnostics")
+        self.assertEqual(script.get_revision("0006_adaptive_training_chunks").down_revision,
+                         "0005_llm_response_diagnostics")
+        self.assertEqual(script.get_revision(HEAD_REVISION).down_revision, "0006_adaptive_training_chunks")
         self.assertEqual(script.get_revision("0005_llm_response_diagnostics").down_revision, "0004_user_roles")
         self.assertIsNone(config.get_main_option("sqlalchemy.url"))
         ini_text = INI_PATH.read_text(encoding="utf-8")
