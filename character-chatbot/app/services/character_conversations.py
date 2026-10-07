@@ -22,6 +22,7 @@ from .chat_latency import set_safe_metadata, stage
 from .chat_prompt_builder import build_chat_instructions
 from .response_quality import select_quality_response
 from .conversation_runtime import ConversationRuntimeState, advance_runtime, turn_output_instructions
+from .character_fidelity import CharacterFidelityContract, build_fidelity_contract
 from .world_profile_service import get_world_profile
 
 ROOM_KIND = "character_pair"
@@ -173,12 +174,14 @@ def _usage_totals(db: Session, room_id: str, token: str, attempts: int, user_id:
 def _room_instructions(speaker_name: str, profile: CharacterProfileData,
                        world: WorldProfileData | None, other_name: str,
                        language: str, last_message: str,
-                       history: list[tuple[MessageRole, str]], runtime_block: str = "") -> str:
+                       history: list[tuple[MessageRole, str]], runtime_block: str = "",
+                       fidelity_contract: CharacterFidelityContract | None = None) -> str:
     base = build_chat_instructions(
         speaker_name, profile, world, correction_prefix="/수정",
         current_message=last_message,
         recent_messages=history,
         response_language_override="Korean" if language == "ko" else "English",
+        fidelity_contract=fidelity_contract,
     )
     return base + f"""
 
@@ -239,9 +242,11 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
                               resolved_thread_count=len(runtime.resolved_threads))
 
         with stage("canonical_state_reconstruction"):
+            fidelity = build_fidelity_contract(speaker_name, profile, world)
+            set_safe_metadata(**fidelity.safe_metadata())
             instructions = _room_instructions(speaker_name, profile, world, other_name,
                                               room_language, last_content, history,
-                                              runtime.prompt_block(speaker_id))
+                                              runtime.prompt_block(speaker_id), fidelity)
         prompt_turn = f"It is {speaker_name}'s turn. Respond to {other_name} with one natural turn."
         with stage("prompt_builder"):
             counter = make_chat_input_counter(db, user_id, ROLEPLAY_MAX_TOKENS)
@@ -286,6 +291,9 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
             language="Korean" if room_language == "ko" else "English",
             allow_repetition=False, retry=retry, runtime_state=runtime,
             speaker=speaker_id, room=True, retry_allowed=not schema_retried,
+            fidelity_contract=fidelity, request_text=last_content,
+            visible_history=[message.content for message in messages
+                             if message.speaker_character_id != speaker_id],
         )
         attempts = max(attempts, 1 + outcome.retry_count)
         set_safe_metadata(**outcome.safe_metadata("character_pair",

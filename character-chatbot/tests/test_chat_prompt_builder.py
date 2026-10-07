@@ -36,11 +36,10 @@ class ChatPromptBuilderTests(unittest.TestCase):
 세계관 개요: 마법이 없는 도시
 세계관 사실: 기차가 다닌다 / 서점이 있다'''
 
-        self.assertEqual(
-            with_world,
-            character_only.replace("- 안녕하세요\n\n\n[중요한 규칙]",
-                                   f"- 안녕하세요\n\n\n{world_block}\n\n[중요한 규칙]"),
-        )
+        self.assertIn(world_block, with_world)
+        self.assertNotIn(world_block, character_only)
+        self.assertIn("World context: 마법이 없는 도시", with_world)
+        self.assertNotIn("World context:", character_only)
         self.assertLess(with_world.index("[캐릭터 설정"), with_world.index("[세계관 설정"))
         self.assertLess(with_world.index("[세계관 설정"), with_world.index("[중요한 규칙]"))
         self.assertNotIn("사용되지 않는 시기", with_world)

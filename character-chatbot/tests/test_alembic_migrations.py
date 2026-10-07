@@ -12,12 +12,15 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, text, update
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
 from app.database import Base
 from app import models  # noqa: F401 - populate Base.metadata
 from app.main import app
+from app.models import Conversation, Message
+from app.services.conversation_runtime import ConversationRuntimeState, RUNTIME_VERSION
 
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -195,13 +198,28 @@ class AlembicFoundationTests(unittest.TestCase):
                 self.assertIsNone(connection.execute(text(
                     "SELECT runtime_state FROM conversations WHERE id='runtime-room'"
                 )).scalar_one())
-                connection.execute(text(
-                    "UPDATE conversations SET runtime_state=:state WHERE id='runtime-room'"
-                ), {"state": '{"version":1,"open_threads":["reply"]}'})
+                connection.execute(update(Conversation).where(Conversation.id == "runtime-room").values(
+                    runtime_state={"version": 1, "last_message_id": "runtime-message",
+                                   "open_threads": ["untrusted_old_thread"]},
+                ))
                 connection.commit()
-                self.assertIsNotNone(connection.execute(text(
+                self.assertEqual(connection.execute(text(
                     "SELECT runtime_state FROM conversations WHERE id='runtime-room'"
-                )).scalar_one())
+                )).scalar_one()["version"], 1)
+                with Session(bind=connection) as db:
+                    room = db.get(Conversation, "runtime-room")
+                    messages = db.query(Message).filter_by(conversation_id="runtime-room").all()
+                    rebuilt = ConversationRuntimeState.from_storage(room.runtime_state, messages)
+                    self.assertEqual(rebuilt.version, RUNTIME_VERSION)
+                    self.assertEqual(rebuilt.last_message_id, "runtime-message")
+                    self.assertEqual(rebuilt.open_threads, [])
+                connection.execute(update(Conversation).where(Conversation.id == "runtime-room").values(
+                    runtime_state=rebuilt.to_storage(),
+                ))
+                connection.commit()
+                self.assertEqual(connection.execute(text(
+                    "SELECT runtime_state FROM conversations WHERE id='runtime-room'"
+                )).scalar_one()["version"], RUNTIME_VERSION)
                 command.downgrade(config, "0007_character_conversations")
                 self.assertNotIn("runtime_state", {c["name"] for c in inspect(connection).get_columns("conversations")})
                 self.assertEqual(connection.execute(text(
@@ -209,6 +227,9 @@ class AlembicFoundationTests(unittest.TestCase):
                 )).scalar_one(), "Existing turn")
                 command.upgrade(config, HEAD_REVISION)
                 self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
+                self.assertIsNone(connection.execute(text(
+                    "SELECT runtime_state FROM conversations WHERE id='runtime-room'"
+                )).scalar_one())
                 self.assertEqual(connection.execute(text(
                     "SELECT count(*) FROM messages WHERE id='runtime-message'"
                 )).scalar_one(), 1)

@@ -23,6 +23,7 @@ from .chat_language import response_language
 from .conversation_loop_guard import is_obvious_loop
 from .response_quality import explicit_repetition_request, select_quality_response
 from .conversation_runtime import ConversationRuntimeState, advance_runtime, turn_output_instructions
+from .character_fidelity import build_fidelity_contract
 
 CORRECTION_PREFIX = "/수정"
 
@@ -124,9 +125,12 @@ def send_message(
 
     with stage("canonical_state_reconstruction"):
         # Prompt builder derives the lived temporal slice from the stored timeline.
+        fidelity = build_fidelity_contract(character.name, profile_data, world_data)
+        set_safe_metadata(**fidelity.safe_metadata())
         instructions = build_chat_instructions(
             character.name, profile_data, world_data, correction_prefix=CORRECTION_PREFIX, locale=locale,
             current_message=user_message, recent_messages=[(m.role, m.content) for m in history],
+            fidelity_contract=fidelity,
         )
         instructions += runtime.prompt_block(character_id) + turn_output_instructions()
     language = response_language(user_message, [(m.role, m.content) for m in history], locale)
@@ -188,6 +192,8 @@ def send_message(
         language=language, allow_repetition=allow_repetition, retry=retry,
         runtime_state=runtime, speaker=character_id, room=False,
         retry_allowed=not schema_retried,
+        fidelity_contract=fidelity, request_text=user_message,
+        visible_history=[m.content for m in history if m.role == MessageRole.USER],
     )
     set_safe_metadata(**outcome.safe_metadata("user_character", language))
     set_safe_metadata(retry_count=max(int(schema_retried), outcome.retry_count),

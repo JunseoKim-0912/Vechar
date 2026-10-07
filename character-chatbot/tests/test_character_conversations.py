@@ -19,7 +19,8 @@ from app.llm_failures import LLMStructuredOutputError
 from app.schemas import CharacterProfileData, TimelineEvent, TimelineStateChanges
 from app.services import character_conversations as rooms, chat_service, memory_jobs, memory_service
 from app.services.conversation_loop_guard import is_obvious_loop
-from app.services.conversation_runtime import ChatTurnResult, TurnProgression, empty_turn
+from app.services.conversation_runtime import RUNTIME_VERSION, ChatTurnResult, TurnFidelity, TurnProgression, empty_turn
+from app.services.character_fidelity import KnowledgeScope
 
 
 def fake_counter(*_args, **_kwargs):
@@ -144,6 +145,7 @@ class CharacterConversationAPITests(unittest.TestCase):
         self.assertIn("B-only secret persona", instructions_b)
         self.assertNotIn("French source character", instructions_b)
         self.assertIn("Respond in English", instructions_a)
+        self.assertIn("[CHARACTER FIDELITY v1", instructions_a)
         self.assertEqual(generation.call_args_list[0].kwargs["task"], "chat")
         self.assertEqual(generation.call_args_list[0].kwargs["request_type"], "character_conversation")
         history = self.client.get(f"/character-conversations/{room['id']}/messages", headers=self.headers)
@@ -263,13 +265,15 @@ class CharacterConversationAPITests(unittest.TestCase):
         room = self.create_room()
         with Session(self.engine) as db:
             db.query(Conversation).filter_by(id=room["id"]).update({"runtime_state": {
-                "version": 1, "last_message_id": None, "open_threads": ["should_gregor_call_grete"],
+                "version": RUNTIME_VERSION, "last_message_id": None, "open_threads": ["should_gregor_call_grete"],
             }})
             db.commit()
         first = ChatTurnResult(response="Gregor calls Grete. Will she answer?", progression=TurnProgression(
             topic="grete", new_development="gregor_calls_grete",
             resolved_thread="should_gregor_call_grete", opened_thread="does_grete_respond",
             action_taken=None, advice_given=None, repeated_point=False,
+        ), fidelity=TurnFidelity(
+            knowledge_scope=KnowledgeScope.UNCERTAIN, persona_preserved=True, assistant_mode=False,
         ))
         with patch.object(rooms, "make_chat_input_counter", side_effect=fake_counter), \
              patch.object(rooms, "generate_text", side_effect=[first, empty_turn("She waits by the doorway.")]) as generation:
@@ -278,6 +282,7 @@ class CharacterConversationAPITests(unittest.TestCase):
             self.assertEqual(created.status_code, 200, created.text)
             self.assertEqual(created.json()["message"]["content"], first.response)
             self.assertNotIn("progression", created.text)
+            self.assertNotIn("fidelity", created.text)
             with Session(self.engine) as db:
                 stored = db.get(Conversation, room["id"]).runtime_state
                 self.assertEqual(stored["open_threads"], ["does_grete_respond"])
@@ -286,6 +291,21 @@ class CharacterConversationAPITests(unittest.TestCase):
                                        headers=self.headers, json={"expected_turn_index": 1})
             self.assertEqual(resumed.status_code, 200, resumed.text)
             self.assertIn("does_grete_respond", generation.call_args_list[1].kwargs["instructions"])
+
+    def test_room_assistant_mode_leak_uses_one_integrated_retry(self):
+        room = self.create_room()
+        with patch.object(rooms, "make_chat_input_counter", side_effect=fake_counter), \
+             patch.object(rooms, "generate_text", side_effect=[
+                 empty_turn("As an AI language model, I can answer as a generic tutor."),
+                 empty_turn("I can only speak from what I have lived."),
+             ]) as generation:
+            result = self.client.post(f"/character-conversations/{room['id']}/next",
+                                      headers=self.headers, json={"expected_turn_index": 0})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(generation.call_count, 2)
+        self.assertEqual(result.json()["message"]["content"], "I can only speak from what I have lived.")
+        with Session(self.engine) as db:
+            self.assertEqual(db.get(Conversation, room["id"]).runtime_state["version"], RUNTIME_VERSION)
 
     def test_schema_failure_consumes_only_one_retry_and_releases_claim(self):
         room = self.create_room()

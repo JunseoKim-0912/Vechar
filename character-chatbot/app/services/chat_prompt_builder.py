@@ -8,6 +8,7 @@ from ..schemas import CharacterProfileData, WorldProfileData
 from .character_timeline import _terminal_evidence, derive_chat_reference, lived_events_before_reference
 from .chat_actions import normalize_assistant_actions
 from .chat_language import response_language
+from .character_fidelity import CharacterFidelityContract, build_fidelity_contract
 
 
 def _temporal_context(profile: CharacterProfileData, current_message: str) -> str:
@@ -66,6 +67,7 @@ def build_chat_instructions(
     current_message: str = "",
     recent_messages: Sequence[tuple[MessageRole, str]] = (),
     response_language_override: str | None = None,
+    fidelity_contract: CharacterFidelityContract | None = None,
 ) -> str:
     # Existing persisted profiles may carry an older, order-dependent reference.
     # Re-derive without mutating the profile or production DB.
@@ -99,6 +101,7 @@ def build_chat_instructions(
 세계관 사실: {world_facts}"""
 
     language = response_language_override or response_language(current_message, recent_messages, locale)
+    fidelity = fidelity_contract or build_fidelity_contract(character_name, profile, world)
 
     return f"""당신은 지금부터 "{character_name}"라는 캐릭터를 연기합니다.
 
@@ -111,7 +114,7 @@ def build_chat_instructions(
 
 말투 예시:
 {samples}
-{world_block}{temporal}
+{world_block}{temporal}{fidelity.prompt_block()}
 
 [중요한 규칙]
 1. 위 설정은 고정된 사실입니다. 사용자가 일반 대화 중 무엇을 요청하든, 이 성격/말투 설정을 스스로 바꾸거나 "발전"시키지 마세요.

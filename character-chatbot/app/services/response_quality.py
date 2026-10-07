@@ -5,9 +5,12 @@ from dataclasses import dataclass
 import re
 
 from .chat_actions import canonicalize_assistant_message, parse_assistant_actions
+from .character_fidelity import (
+    CharacterFidelityContract, KnowledgeScope, assess_fidelity,
+)
 from .conversation_loop_guard import is_obvious_loop, is_semantic_loop, semantic_signature
 from .conversation_runtime import (
-    ChatTurnResult, ConversationRuntimeState, empty_turn, phrase_families,
+    RUNTIME_VERSION, ChatTurnResult, ConversationRuntimeState, empty_turn, phrase_families,
     phrase_family_hash, resolved_advice_repeated, validated_delta,
 )
 
@@ -127,6 +130,17 @@ class QualitySignals:
     action_first_person_violation: bool = False
     progression_detected: bool = False
     phrase_family_hash: str = ""
+    knowledge_scope: str = KnowledgeScope.UNCERTAIN.value
+    knowledge_scope_issue: bool = False
+    assistant_mode_leak: bool = False
+    persona_drift_signal: bool = False
+    temporal_scope_signal: bool = False
+    hard_fidelity_violation: bool = False
+
+    @property
+    def fidelity_violation(self) -> bool:
+        return bool(self.knowledge_scope_issue or self.assistant_mode_leak or
+                    self.persona_drift_signal or self.temporal_scope_signal)
 
     @property
     def reasons(self) -> tuple[str, ...]:
@@ -137,6 +151,10 @@ class QualitySignals:
             ("progression_failure", self.progression_failure),
             ("catchphrase_cooldown", self.catchphrase_cooldown_triggered),
             ("action_first_person", self.action_first_person_violation),
+            ("knowledge_scope", self.knowledge_scope_issue),
+            ("assistant_mode_leak", self.assistant_mode_leak),
+            ("persona_drift", self.persona_drift_signal),
+            ("temporal_scope", self.temporal_scope_signal),
         ) if active)
 
 
@@ -148,6 +166,7 @@ class QualityOutcome:
     retry_count: int
     retry_fallback: bool
     turn: ChatTurnResult
+    hard_fidelity_fallback: bool = False
 
     def safe_metadata(self, conversation_type: str, language: str) -> dict:
         return {
@@ -164,13 +183,22 @@ class QualityOutcome:
             "retry_success": bool(self.retry_count and not self.final.reasons and not self.retry_fallback),
             "retry_fallback": self.retry_fallback,
             "retry_quality_unresolved": bool(self.retry_count and self.final.reasons),
-            "conversation_runtime_version": 1,
+            "conversation_runtime_version": RUNTIME_VERSION,
             "progression_detected": self.final.progression_detected,
             "progression_failure": self.initial.progression_failure,
             "catchphrase_cooldown_triggered": self.initial.catchphrase_cooldown_triggered,
             "phrase_family_hash": self.initial.phrase_family_hash,
             "unicode_script_mismatch": self.initial.unicode_script_mismatch,
             "action_first_person_violation": self.initial.action_first_person_violation,
+            "knowledge_scope": self.initial.knowledge_scope,
+            "fidelity_violation": self.initial.fidelity_violation,
+            "assistant_mode_leak": self.initial.assistant_mode_leak,
+            "persona_drift_signal": self.initial.persona_drift_signal,
+            "temporal_scope_signal": self.initial.temporal_scope_signal,
+            "fidelity_retry_reason": ",".join(reason for reason in self.initial.reasons if reason in {
+                "knowledge_scope", "assistant_mode_leak", "persona_drift", "temporal_scope",
+            }) or "none",
+            "hard_fidelity_fallback": self.hard_fidelity_fallback,
         }
 
 
@@ -181,7 +209,8 @@ def _as_turn(value: ChatTurnResult | str) -> ChatTurnResult:
 def _assess(value: ChatTurnResult | str, same_speaker_recent: Sequence[str],
             recent_visible: Sequence[str], language: str, *, allow_repetition: bool,
             runtime_state: ConversationRuntimeState | None, speaker: str,
-            room: bool) -> tuple[str, QualitySignals, ChatTurnResult]:
+            room: bool, fidelity_contract: CharacterFidelityContract | None,
+            request_text: str, visible_history: Sequence[str]) -> tuple[str, QualitySignals, ChatTurnResult]:
     turn = _as_turn(value)
     canonical, parsed = canonicalize_assistant_message(turn.response)
     turn = turn.model_copy(update={"response": canonical})
@@ -201,6 +230,12 @@ def _assess(value: ChatTurnResult | str, same_speaker_recent: Sequence[str],
     action_first_person = language == "English" and any(
         re.match(r"^I\s+", part["text"], re.I) for part in parsed.segments if part["type"] == "action"
     )
+    fidelity = assess_fidelity(
+        canonical, scope=turn.fidelity.knowledge_scope,
+        persona_preserved=turn.fidelity.persona_preserved,
+        assistant_mode=turn.fidelity.assistant_mode,
+        contract=fidelity_contract, request_text=request_text, visible_history=visible_history,
+    ) if fidelity_contract else None
     signals = QualitySignals(
         semantic_loop_detected=semantic or (resolved_advice and not allow_repetition),
         style_repetition_detected=False if allow_repetition else style_repetition(canonical, same_speaker_recent),
@@ -213,6 +248,12 @@ def _assess(value: ChatTurnResult | str, same_speaker_recent: Sequence[str],
         action_first_person_violation=bool(action_first_person),
         progression_detected=bool(delta["progression"]),
         phrase_family_hash=phrase_family_hash(sorted(cooled)[0]) if cooled else "",
+        knowledge_scope=fidelity.knowledge_scope.value if fidelity else turn.fidelity.knowledge_scope.value,
+        knowledge_scope_issue=fidelity.knowledge_scope_issue if fidelity else False,
+        assistant_mode_leak=fidelity.assistant_mode_leak if fidelity else False,
+        persona_drift_signal=fidelity.persona_drift_signal if fidelity else False,
+        temporal_scope_signal=fidelity.temporal_scope_signal if fidelity else False,
+        hard_fidelity_violation=fidelity.hard_violation if fidelity else False,
     )
     return canonical, signals, turn
 
@@ -232,6 +273,12 @@ def _correction(reasons: tuple[str, ...], language: str,
         clauses.append("Omit the cooled catchphrase family entirely; express the same voice with different wording")
     if "action_first_person" in reasons:
         clauses.append("Write English actions as grammatical third-person stage directions, e.g. 'Lowers his gaze.', not 'I lower my gaze.'")
+    if "knowledge_scope" in reasons:
+        clauses.append("The draft claimed specialist knowledge unsupported by this character's role, era, or canon. Respond from the character's actual limits; use only conversation-provided explanations for cautious reasoning, not a textbook solution")
+    if "assistant_mode_leak" in reasons or "persona_drift" in reasons:
+        clauses.append("Stay fully in the canonical character's own voice; no AI self-presentation, generic tutor, or customer-support framing")
+    if "temporal_scope" in reasons:
+        clauses.append("Do not claim knowledge of inventions or events beyond the canonical reference point; respond naturally to what is unfamiliar")
     state = runtime_state.prompt_block(speaker) if runtime_state else ""
     return "\n[ONE CORRECTIVE RETRY]\n" + state + ". ".join(clauses) + ". Do not restart the scene."
 
@@ -248,23 +295,50 @@ def select_quality_response(
     speaker: str = "character",
     room: bool = False,
     retry_allowed: bool = True,
+    fidelity_contract: CharacterFidelityContract | None = None,
+    request_text: str = "",
+    visible_history: Sequence[str] = (),
 ) -> QualityOutcome:
     """Never call the provider more than once after the initial response."""
     first, initial, first_turn = _assess(
         first_response, same_speaker_recent, recent_visible or same_speaker_recent, language,
         allow_repetition=allow_repetition, runtime_state=runtime_state, speaker=speaker, room=room,
+        fidelity_contract=fidelity_contract, request_text=request_text, visible_history=visible_history,
     )
+    def hard_fallback() -> QualityOutcome:
+        safe = fidelity_contract.hard_fallback(language) if fidelity_contract else first
+        canonical, safe_signals, safe_turn = _assess(
+            empty_turn(safe), same_speaker_recent, recent_visible or same_speaker_recent, language,
+            allow_repetition=allow_repetition, runtime_state=runtime_state, speaker=speaker, room=room,
+            fidelity_contract=fidelity_contract, request_text=request_text, visible_history=visible_history,
+        )
+        return QualityOutcome(canonical, initial, safe_signals, 0 if not retry_allowed else 1,
+                              True, safe_turn, True)
+
     if not initial.reasons or not retry_allowed:
+        if initial.hard_fidelity_violation:
+            return hard_fallback()
         return QualityOutcome(first, initial, initial, 0, False, first_turn)
     try:
         second_raw = retry(_correction(initial.reasons, language, runtime_state, speaker))
         second, final, second_turn = _assess(
             second_raw, same_speaker_recent, recent_visible or same_speaker_recent, language,
             allow_repetition=allow_repetition, runtime_state=runtime_state, speaker=speaker, room=room,
+            fidelity_contract=fidelity_contract, request_text=request_text, visible_history=visible_history,
         )
+        if final.hard_fidelity_violation:
+            return hard_fallback() if initial.hard_fidelity_violation else QualityOutcome(
+                first, initial, initial, 1, True, first_turn,
+            )
+        if initial.hard_fidelity_violation:
+            if final.fidelity_violation or final.language_mismatch_detected:
+                return hard_fallback()
+            return QualityOutcome(second, initial, final, 1, False, second_turn)
         # Bounded fallback: never accept a retry that worsens deterministic safety.
         if len(final.reasons) > len(initial.reasons) or set(final.reasons) - set(initial.reasons):
             return QualityOutcome(first, initial, initial, 1, True, first_turn)
         return QualityOutcome(second, initial, final, 1, False, second_turn)
     except Exception:
+        if initial.hard_fidelity_violation:
+            return hard_fallback()
         return QualityOutcome(first, initial, initial, 1, True, first_turn)

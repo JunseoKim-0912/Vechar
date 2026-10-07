@@ -86,7 +86,7 @@ class MemoryServiceTests(unittest.TestCase):
         )
         self.assertEqual(response, {"role": "CHARACTER", "content": "답변"})
         self.assertTrue(generation.call_args.kwargs["instructions"].startswith(expected_instructions))
-        self.assertIn("[CONVERSATION RUNTIME v1", generation.call_args.kwargs["instructions"])
+        self.assertIn("[CONVERSATION RUNTIME v2", generation.call_args.kwargs["instructions"])
         self.assertEqual(generation.call_args.kwargs["input_messages"], build_chat_input([], "안녕"))
         self.assertEqual(generation.call_args.kwargs["input_messages"], expected_budget.input_messages)
         self.assertEqual((generation.call_args.kwargs["task"], generation.call_args.kwargs["request_type"]),

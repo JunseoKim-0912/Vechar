@@ -748,6 +748,8 @@ class LLMUsageTests(unittest.TestCase):
                             "resolved_thread": None, "opened_thread": None,
                             "action_taken": None, "advice_given": None,
                             "repeated_point": False},
+            "fidelity": {"knowledge_scope": "plausible_general", "persona_preserved": True,
+                         "assistant_mode": False},
         }))
 
         def test_db():

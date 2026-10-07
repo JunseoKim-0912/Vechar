@@ -8,8 +8,9 @@ from openai.lib._parsing._responses import type_to_text_format_param
 from app.models import MessageRole
 from app.services.conversation_runtime import (
     COOLDOWN_REPLIES, RUNTIME_VERSION, ChatTurnResult, ConversationRuntimeState,
-    TurnProgression, advance_runtime, empty_turn, phrase_families, validated_delta,
+    TurnFidelity, TurnProgression, advance_runtime, empty_turn, phrase_families, validated_delta,
 )
+from app.services.character_fidelity import KnowledgeScope
 from app.services.response_quality import language_mismatch, select_quality_response
 
 
@@ -18,7 +19,9 @@ def turn(response, **changes):
                   opened_thread=None, action_taken=None, advice_given=None,
                   repeated_point=False)
     fields.update(changes)
-    return ChatTurnResult(response=response, progression=TurnProgression(**fields))
+    return ChatTurnResult(response=response, progression=TurnProgression(**fields),
+                          fidelity=TurnFidelity(knowledge_scope=KnowledgeScope.UNCERTAIN,
+                                                persona_preserved=True, assistant_mode=False))
 
 
 class RuntimeStateTests(unittest.TestCase):
@@ -28,6 +31,7 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertTrue(fmt["strict"])
         self.assertIn("response", fmt["schema"]["required"])
         self.assertIn("progression", fmt["schema"]["required"])
+        self.assertIn("fidelity", fmt["schema"]["required"])
         with self.assertRaises(ValueError):
             empty_turn("  ")
         with self.assertRaises(ValueError):

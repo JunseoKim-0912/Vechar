@@ -9,9 +9,10 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from ..models import Message, MessageRole
 from .chat_actions import canonicalize_assistant_message, parse_assistant_actions
+from .character_fidelity import KnowledgeScope
 from .conversation_loop_guard import semantic_signature
 
-RUNTIME_VERSION = 1
+RUNTIME_VERSION = 2
 COOLDOWN_REPLIES = 3
 MAX_ESTABLISHED = 8
 MAX_RESOLVED = 6
@@ -52,10 +53,20 @@ class TurnProgression(BaseModel):
     repeated_point: bool
 
 
+class TurnFidelity(BaseModel):
+    """Untrusted same-call self-report, checked against canon and visible text."""
+
+    model_config = ConfigDict(extra="forbid")
+    knowledge_scope: KnowledgeScope
+    persona_preserved: bool
+    assistant_mode: bool
+
+
 class ChatTurnResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     response: str
     progression: TurnProgression
+    fidelity: TurnFidelity
 
     @field_validator("response")
     @classmethod
@@ -71,7 +82,8 @@ def empty_turn(response: str) -> ChatTurnResult:
     return ChatTurnResult(response=response, progression=TurnProgression(
         topic="", new_development=None, resolved_thread=None, opened_thread=None,
         action_taken=None, advice_given=None, repeated_point=False,
-    ))
+    ), fidelity=TurnFidelity(knowledge_scope=KnowledgeScope.UNCERTAIN,
+                            persona_preserved=True, assistant_mode=False))
 
 
 def turn_output_instructions() -> str:
@@ -82,8 +94,11 @@ Progression fields are short snake_case hints, not prose: topic, new_development
 resolved_thread, opened_thread, action_taken, advice_given, repeated_point.
 Use null for absent changes. A resolved_thread must name an actually open thread;
 do not claim a decision or action occurred when it was only suggested or imagined.
-Never place JSON keys or progression metadata inside response. Normal output needs
-one provider call; the server validates these hints against the visible response.
+Fidelity fields are compact: knowledge_scope is canonical, plausible_general,
+uncertain, or outside_scope; persona_preserved and assistant_mode describe the
+visible answer. Do not claim canonical knowledge without canonical evidence.
+Never place JSON keys or metadata inside response. Normal output needs one
+provider call; the server validates these untrusted hints against visible text.
 """
 
 
@@ -181,7 +196,7 @@ class ConversationRuntimeState:
     def prompt_block(self, speaker: str) -> str:
         def row(name: str, values: Sequence[str]) -> str:
             return f"- {name}: {', '.join(values) if values else 'none'}"
-        return "\n[CONVERSATION RUNTIME v1 — lower priority than canon; hints, not facts]\n" + "\n".join((
+        return f"\n[CONVERSATION RUNTIME v{RUNTIME_VERSION} — lower priority than canon; hints, not facts]\n" + "\n".join((
             row("Already established", self.established_points),
             row("Resolved threads", self.resolved_threads),
             row("Still open", self.open_threads),
