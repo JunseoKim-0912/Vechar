@@ -265,7 +265,9 @@ class CharacterConversationAPITests(unittest.TestCase):
         room = self.create_room()
         with Session(self.engine) as db:
             db.query(Conversation).filter_by(id=room["id"]).update({"runtime_state": {
-                "version": RUNTIME_VERSION, "last_message_id": None, "open_threads": ["should_gregor_call_grete"],
+                "version": RUNTIME_VERSION, "last_message_id": None,
+                "threads": [{"id": "should_gregor_call_grete", "status": "open"}],
+                "active_thread_id": "should_gregor_call_grete",
             }})
             db.commit()
         first = ChatTurnResult(response="Gregor calls Grete. Will she answer?", progression=TurnProgression(
@@ -330,6 +332,29 @@ class CharacterConversationAPITests(unittest.TestCase):
             self.assertEqual(stored.turn_index, 0)
             self.assertIsNone(stored.generation_token)
             self.assertEqual(db.query(Message).filter_by(conversation_id=failed_room["id"]).count(), 0)
+
+    def test_invalid_resolved_thread_drafts_do_not_commit_room_turn(self):
+        room = self.create_room()
+        with Session(self.engine) as db:
+            db.query(Conversation).filter_by(id=room["id"]).update({"runtime_state": {
+                "version": RUNTIME_VERSION, "last_message_id": None,
+                "threads": [{"id": "should_call_grete", "status": "resolved"}],
+                "active_thread_id": None,
+            }})
+            db.commit()
+        with patch.object(rooms, "make_chat_input_counter", side_effect=fake_counter), \
+             patch.object(rooms, "generate_text", return_value=empty_turn(
+                 "You should call Grete again.")) as generation:
+            failed = self.client.post(f"/character-conversations/{room['id']}/next",
+                                      headers=self.headers, json={"expected_turn_index": 0})
+        self.assertEqual(failed.status_code, 503)
+        self.assertEqual(generation.call_count, 2)
+        with Session(self.engine) as db:
+            stored = db.get(Conversation, room["id"])
+            self.assertEqual(stored.turn_index, 0)
+            self.assertIsNone(stored.generation_token)
+            self.assertEqual(stored.runtime_state["threads"][0]["status"], "resolved")
+            self.assertEqual(db.query(Message).filter_by(conversation_id=room["id"]).count(), 0)
 
     def test_expired_claim_recovers_without_advance_or_phantom_message(self):
         room = self.create_room()
