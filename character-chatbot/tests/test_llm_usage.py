@@ -747,9 +747,7 @@ class LLMUsageTests(unittest.TestCase):
             "progression": {"topic": "greeting", "new_development": None,
                             "resolved_thread": None, "opened_thread": None,
                             "action_taken": None, "advice_given": None,
-                            "repeated_point": False, "active_thread_id": None,
-                            "transition": "hold", "new_thread_id": None,
-                            "resolved_thread_ids": [], "reopened_thread_ids": []},
+                            "repeated_point": False},
             "fidelity": {"knowledge_scope": "plausible_general", "persona_preserved": True,
                          "assistant_mode": False},
         }))

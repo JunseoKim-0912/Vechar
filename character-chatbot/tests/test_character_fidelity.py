@@ -200,7 +200,7 @@ class CharacterFidelityTests(unittest.TestCase):
         self.assertNotIn("AI language model", failed.text)
         self.assertNotIn("convolution", failed.text)
 
-    def test_v1_missing_malformed_and_future_snapshots_rebuild_to_v3(self):
+    def test_v1_missing_malformed_and_future_snapshots_rebuild_to_v2(self):
         messages = [SimpleNamespace(id="m1", role=MessageRole.CHARACTER,
                                     speaker_character_id="doctor", content="I will listen.")]
         for payload in (None, {"version": 1, "last_message_id": "m1", "open_threads": ["false_fact"]},
@@ -257,7 +257,7 @@ class FidelityChatIntegrationTests(unittest.TestCase):
                                                question, self.user_id, locale="en")
             return result, provider.call_args_list
 
-    def test_doctor_dsp_question_corrects_textbook_answer_and_persists_v3(self):
+    def test_doctor_dsp_question_corrects_textbook_answer_and_persists_v2(self):
         with Session(self.engine) as db:
             conversation_id = self.conversation(db, self.doctor_id,
                                                 {"version": 1, "last_message_id": None,
@@ -276,22 +276,6 @@ class FidelityChatIntegrationTests(unittest.TestCase):
             self.assertEqual(stored["version"], RUNTIME_VERSION)
             self.assertEqual(stored["open_threads"], [])
             self.assertEqual(db.query(Message).filter_by(conversation_id=conversation_id).count(), 2)
-
-    def test_prior_doctor_proof_is_continuity_not_expertise(self):
-        with Session(self.engine) as db:
-            conversation_id = self.conversation(db, self.doctor_id)
-            db.add(Message(conversation_id=conversation_id, role=MessageRole.CHARACTER, content=PROOF))
-            db.commit()
-            result, calls = self.send(db, self.doctor_id, conversation_id, DSP_QUESTION, [
-                make_turn(PROOF, scope=KnowledgeScope.CANONICAL),
-                make_turn("Those symbols are still unfamiliar to me. What do they mean?",
-                          scope=KnowledgeScope.OUTSIDE_SCOPE),
-            ])
-            self.assertEqual(len(calls), 2)
-            self.assertIn("PRIOR_SELF_OUTPUT", calls[0].kwargs["instructions"])
-            self.assertNotIn(PROOF, result["content"])
-            self.assertEqual(db.get(Conversation, conversation_id).runtime_state[
-                "knowledge_provenance_summary"]["prior_self_output"], 1)
 
     def test_doctor_everyday_and_arithmetic_keep_one_call(self):
         with Session(self.engine) as db:

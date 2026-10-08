@@ -11,9 +11,8 @@ from .character_fidelity import (
 from .conversation_loop_guard import is_obvious_loop, is_semantic_loop, semantic_signature
 from .conversation_runtime import (
     RUNTIME_VERSION, ChatTurnResult, ConversationRuntimeState, empty_turn, phrase_families,
-    phrase_family_hash, style_categories, validated_delta,
+    phrase_family_hash, resolved_advice_repeated, validated_delta,
 )
-from .knowledge_provenance import KnowledgeProvenance
 
 _URL = re.compile(r"https?://\S+", re.I)
 _SHORT_QUOTE = re.compile(r"[\"“‘«][^\"”’»]{1,50}[\"”’»]")
@@ -28,10 +27,6 @@ _FRENCH_FUNCTION = {"dans", "avec", "pour", "vous", "nous", "elle", "mais", "par
                     "une", "est", "suis", "pas", "plus", "comme", "cette", "leur"}
 _COMMON_STYLE = {"그래", "알았어", "한다", "해", "네", "응", "그렇다", "okay", "yes", "well", "right", "then"}
 _REPEAT_REQUEST = re.compile(r"다시\s*(?:말|해|설명)|반복해|방금\s*한\s*말|정확히\s*뭐라고|repeat|say\s+that\s+again|quote\s+yourself", re.I)
-
-
-class InvalidConversationTransitionError(RuntimeError):
-    """Two bounded drafts failed a hard room transition; persist neither."""
 
 
 def explicit_repetition_request(message: str) -> bool:
@@ -141,16 +136,6 @@ class QualitySignals:
     persona_drift_signal: bool = False
     temporal_scope_signal: bool = False
     hard_fidelity_violation: bool = False
-    invalid_thread_transition: bool = False
-    resolved_thread_reuse: bool = False
-    exhausted_thread_reuse: bool = False
-    topic_budget_exhausted: bool = False
-    active_thread_present: bool = False
-    thread_transition_type: str = "hold"
-    thread_reopened: bool = False
-    style_category_cooldown: bool = False
-    prior_self_expertise_blocked: bool = False
-    provenance_categories: tuple[str, ...] = ()
 
     @property
     def fidelity_violation(self) -> bool:
@@ -164,11 +149,7 @@ class QualitySignals:
             ("style_repetition", self.style_repetition_detected),
             ("language_mismatch", self.language_mismatch_detected),
             ("progression_failure", self.progression_failure),
-            ("invalid_thread_transition", self.invalid_thread_transition),
-            ("resolved_thread_reuse", self.resolved_thread_reuse),
-            ("exhausted_thread_reuse", self.exhausted_thread_reuse),
             ("catchphrase_cooldown", self.catchphrase_cooldown_triggered),
-            ("style_category_cooldown", self.style_category_cooldown),
             ("action_first_person", self.action_first_person_violation),
             ("knowledge_scope", self.knowledge_scope_issue),
             ("assistant_mode_leak", self.assistant_mode_leak),
@@ -218,17 +199,6 @@ class QualityOutcome:
                 "knowledge_scope", "assistant_mode_leak", "persona_drift", "temporal_scope",
             }) or "none",
             "hard_fidelity_fallback": self.hard_fidelity_fallback,
-            "active_thread_present": self.final.active_thread_present,
-            "thread_transition_type": self.final.thread_transition_type,
-            "resolved_thread_reuse_detected": self.initial.resolved_thread_reuse,
-            "exhausted_thread_reuse_detected": self.initial.exhausted_thread_reuse,
-            "thread_reopened": self.final.thread_reopened,
-            "topic_budget_exhausted": self.final.topic_budget_exhausted,
-            "provenance_categories_used": ",".join(self.final.provenance_categories),
-            "prior_self_expertise_blocked": self.initial.prior_self_expertise_blocked,
-            "style_category_cooldown": self.initial.style_category_cooldown,
-            "final_quality_status": "fallback" if self.retry_fallback else
-                                    "accepted_after_retry" if self.retry_count else "accepted",
         }
 
 
@@ -240,8 +210,7 @@ def _assess(value: ChatTurnResult | str, same_speaker_recent: Sequence[str],
             recent_visible: Sequence[str], language: str, *, allow_repetition: bool,
             runtime_state: ConversationRuntimeState | None, speaker: str,
             room: bool, fidelity_contract: CharacterFidelityContract | None,
-            request_text: str, visible_history: Sequence[str],
-            provenance: KnowledgeProvenance | None) -> tuple[str, QualitySignals, ChatTurnResult]:
+            request_text: str, visible_history: Sequence[str]) -> tuple[str, QualitySignals, ChatTurnResult]:
     turn = _as_turn(value)
     canonical, parsed = canonicalize_assistant_message(turn.response)
     turn = turn.model_copy(update={"response": canonical})
@@ -252,16 +221,12 @@ def _assess(value: ChatTurnResult | str, same_speaker_recent: Sequence[str],
     delta = validated_delta(runtime_state, turn) if runtime_state else {"progression": False}
     signature = semantic_signature(canonical)
     settled = bool(runtime_state and signature and signature[0] in runtime_state.established_points)
-    resolved_advice = bool(delta.get("resolved_reuse"))
+    resolved_advice = bool(runtime_state and resolved_advice_repeated(runtime_state, canonical))
     progression_failure = bool(room and runtime_state and not allow_repetition and
                                not delta["progression"] and
-                               (turn.progression.repeated_point or settled or resolved_advice
-                                or (runtime_state.threads and not runtime_state.select_active_thread())))
+                               (turn.progression.repeated_point or settled or resolved_advice))
     families = phrase_families(canonical)
     cooled = families & runtime_state.active_families(speaker) if runtime_state and not allow_repetition else set()
-    categories = style_categories(canonical)
-    cooled_categories = (categories & runtime_state.active_style_categories(speaker)
-                         if runtime_state and not allow_repetition else set())
     action_first_person = language == "English" and any(
         re.match(r"^I\s+", part["text"], re.I) for part in parsed.segments if part["type"] == "action"
     )
@@ -270,10 +235,9 @@ def _assess(value: ChatTurnResult | str, same_speaker_recent: Sequence[str],
         persona_preserved=turn.fidelity.persona_preserved,
         assistant_mode=turn.fidelity.assistant_mode,
         contract=fidelity_contract, request_text=request_text, visible_history=visible_history,
-        provenance=provenance,
     ) if fidelity_contract else None
     signals = QualitySignals(
-        semantic_loop_detected=semantic,
+        semantic_loop_detected=semantic or (resolved_advice and not allow_repetition),
         style_repetition_detected=False if allow_repetition else style_repetition(canonical, same_speaker_recent),
         language_mismatch_detected=language_mismatch(canonical, language),
         action_format_repaired=parsed.format_repaired,
@@ -290,16 +254,6 @@ def _assess(value: ChatTurnResult | str, same_speaker_recent: Sequence[str],
         persona_drift_signal=fidelity.persona_drift_signal if fidelity else False,
         temporal_scope_signal=fidelity.temporal_scope_signal if fidelity else False,
         hard_fidelity_violation=fidelity.hard_violation if fidelity else False,
-        invalid_thread_transition=bool(room and delta.get("invalid_transition")),
-        resolved_thread_reuse=bool(room and delta.get("resolved_reuse")),
-        exhausted_thread_reuse=bool(room and delta.get("exhausted_reuse")),
-        topic_budget_exhausted=bool(room and delta.get("topic_budget_exhausted")),
-        active_thread_present=bool(runtime_state and runtime_state.select_active_thread()),
-        thread_transition_type=str(delta.get("transition", "hold")),
-        thread_reopened=bool(delta.get("reopened")),
-        style_category_cooldown=bool(cooled_categories),
-        prior_self_expertise_blocked=fidelity.prior_self_expertise_blocked if fidelity else False,
-        provenance_categories=provenance.categories() if provenance else (),
     )
     return canonical, signals, turn
 
@@ -315,13 +269,8 @@ def _correction(reasons: tuple[str, ...], language: str,
         clauses.append(f"Respond entirely in {language}, including dialogue and actions; no unexpected Japanese kana; proper nouns may remain unchanged")
     if "progression_failure" in reasons:
         clauses.append("Resolve or open a genuinely different thread or show a consequence; do not re-offer settled advice")
-    if any(reason in reasons for reason in ("invalid_thread_transition", "resolved_thread_reuse",
-                                            "exhausted_thread_reuse")):
-        clauses.append("Follow the single ACTIVE thread or a canon-related new consequence; do not reactivate a resolved or exhausted thread without a visible new event")
     if "catchphrase_cooldown" in reasons:
         clauses.append("Omit the cooled catchphrase family entirely; express the same voice with different wording")
-    if "style_category_cooldown" in reasons:
-        clauses.append("Avoid the cooled style category, including synonym insults; preserve the same character's playful or blunt voice without that device")
     if "action_first_person" in reasons:
         clauses.append("Write English actions as grammatical third-person stage directions, e.g. 'Lowers his gaze.', not 'I lower my gaze.'")
     if "knowledge_scope" in reasons:
@@ -330,7 +279,7 @@ def _correction(reasons: tuple[str, ...], language: str,
         clauses.append("Stay fully in the canonical character's own voice; no AI self-presentation, generic tutor, or customer-support framing")
     if "temporal_scope" in reasons:
         clauses.append("Do not claim knowledge of inventions or events beyond the canonical reference point; respond naturally to what is unfamiliar")
-    state = runtime_state.prompt_block(speaker, room=True) if runtime_state else ""
+    state = runtime_state.prompt_block(speaker) if runtime_state else ""
     return "\n[ONE CORRECTIVE RETRY]\n" + state + ". ".join(clauses) + ". Do not restart the scene."
 
 
@@ -349,14 +298,12 @@ def select_quality_response(
     fidelity_contract: CharacterFidelityContract | None = None,
     request_text: str = "",
     visible_history: Sequence[str] = (),
-    provenance: KnowledgeProvenance | None = None,
 ) -> QualityOutcome:
     """Never call the provider more than once after the initial response."""
     first, initial, first_turn = _assess(
         first_response, same_speaker_recent, recent_visible or same_speaker_recent, language,
         allow_repetition=allow_repetition, runtime_state=runtime_state, speaker=speaker, room=room,
         fidelity_contract=fidelity_contract, request_text=request_text, visible_history=visible_history,
-        provenance=provenance,
     )
     def hard_fallback() -> QualityOutcome:
         safe = fidelity_contract.hard_fallback(language) if fidelity_contract else first
@@ -364,16 +311,11 @@ def select_quality_response(
             empty_turn(safe), same_speaker_recent, recent_visible or same_speaker_recent, language,
             allow_repetition=allow_repetition, runtime_state=runtime_state, speaker=speaker, room=room,
             fidelity_contract=fidelity_contract, request_text=request_text, visible_history=visible_history,
-            provenance=provenance,
         )
-        if room and safe_signals.invalid_thread_transition:
-            raise InvalidConversationTransitionError("No valid room transition")
         return QualityOutcome(canonical, initial, safe_signals, 0 if not retry_allowed else 1,
                               True, safe_turn, True)
 
     if not initial.reasons or not retry_allowed:
-        if room and initial.invalid_thread_transition:
-            raise InvalidConversationTransitionError("No valid room transition")
         if initial.hard_fidelity_violation:
             return hard_fallback()
         return QualityOutcome(first, initial, initial, 0, False, first_turn)
@@ -383,10 +325,7 @@ def select_quality_response(
             second_raw, same_speaker_recent, recent_visible or same_speaker_recent, language,
             allow_repetition=allow_repetition, runtime_state=runtime_state, speaker=speaker, room=room,
             fidelity_contract=fidelity_contract, request_text=request_text, visible_history=visible_history,
-            provenance=provenance,
         )
-        if room and final.invalid_thread_transition:
-            raise InvalidConversationTransitionError("No valid room transition after retry")
         if final.hard_fidelity_violation:
             return hard_fallback() if initial.hard_fidelity_violation else QualityOutcome(
                 first, initial, initial, 1, True, first_turn,
@@ -397,15 +336,9 @@ def select_quality_response(
             return QualityOutcome(second, initial, final, 1, False, second_turn)
         # Bounded fallback: never accept a retry that worsens deterministic safety.
         if len(final.reasons) > len(initial.reasons) or set(final.reasons) - set(initial.reasons):
-            if room and initial.invalid_thread_transition:
-                raise InvalidConversationTransitionError("No safe room transition after retry")
             return QualityOutcome(first, initial, initial, 1, True, first_turn)
         return QualityOutcome(second, initial, final, 1, False, second_turn)
-    except InvalidConversationTransitionError:
-        raise
     except Exception:
-        if room and initial.invalid_thread_transition:
-            raise InvalidConversationTransitionError("Room transition retry failed") from None
         if initial.hard_fidelity_violation:
             return hard_fallback()
         return QualityOutcome(first, initial, initial, 1, True, first_turn)

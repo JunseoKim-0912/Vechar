@@ -22,7 +22,6 @@ from .chat_latency import set_safe_metadata, stage
 from .chat_prompt_builder import build_chat_instructions
 from .response_quality import select_quality_response
 from .conversation_runtime import ConversationRuntimeState, advance_runtime, turn_output_instructions
-from .knowledge_provenance import KnowledgeProvenance
 from .character_fidelity import CharacterFidelityContract, build_fidelity_contract
 from .world_profile_service import get_world_profile
 
@@ -176,7 +175,6 @@ def _room_instructions(speaker_name: str, profile: CharacterProfileData,
                        world: WorldProfileData | None, other_name: str,
                        language: str, last_message: str,
                        history: list[tuple[MessageRole, str]], runtime_block: str = "",
-                       provenance_block: str = "",
                        fidelity_contract: CharacterFidelityContract | None = None) -> str:
     base = build_chat_instructions(
         speaker_name, profile, world, correction_prefix="/수정",
@@ -199,7 +197,7 @@ on an action, resolve or deepen an open thread, introduce a consequence, change 
 a related new perspective. A wish already expressed, advice already given, and a limitation already named
 are established; do not paraphrase them as if new. The same canonical motif may recur only to make a new
 point. Preserve continuity and voice; do not jump to an unrelated topic just to be novel.
-{runtime_block}{provenance_block}{turn_output_instructions()}"""
+{runtime_block}{turn_output_instructions()}"""
 
 
 def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int) -> dict:
@@ -232,27 +230,23 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
             messages.reverse()
             history = [
                 (MessageRole.CHARACTER, message.content) if message.speaker_character_id == speaker_id
-                else (MessageRole.USER, f"[PEER_CLAIM] {other_name} said: "
-                      f"{normalize_assistant_actions(message.content)}")
+                else (MessageRole.USER, f"{other_name} said: {normalize_assistant_actions(message.content)}")
                 for message in messages
             ]
             same_speaker_recent = [message.content for message in messages
                                    if message.speaker_character_id == speaker_id][-5:]
             last_content = messages[-1].content if messages else ""
             runtime = ConversationRuntimeState.from_storage(room.runtime_state, messages)
-            provenance = KnowledgeProvenance.for_room(messages, speaker_id)
             set_safe_metadata(conversation_runtime_version=runtime.version,
                               open_thread_count=len(runtime.open_threads),
-                              resolved_thread_count=len(runtime.resolved_threads),
-                              **provenance.safe_counts())
+                              resolved_thread_count=len(runtime.resolved_threads))
 
         with stage("canonical_state_reconstruction"):
             fidelity = build_fidelity_contract(speaker_name, profile, world)
             set_safe_metadata(**fidelity.safe_metadata())
             instructions = _room_instructions(speaker_name, profile, world, other_name,
                                               room_language, last_content, history,
-                                              runtime.prompt_block(speaker_id, room=True),
-                                              provenance.prompt_block(), fidelity)
+                                              runtime.prompt_block(speaker_id), fidelity)
         prompt_turn = f"It is {speaker_name}'s turn. Respond to {other_name} with one natural turn."
         with stage("prompt_builder"):
             counter = make_chat_input_counter(db, user_id, ROLEPLAY_MAX_TOKENS)
@@ -285,8 +279,6 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
                                       budget.input_messages)
 
         def retry(correction: str):
-            nonlocal attempts
-            attempts = 2
             retry_instructions = instructions + correction
             with stage("prompt_builder"):
                 retry_budget = select_chat_context(retry_instructions, history, prompt_turn,
@@ -300,14 +292,14 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
             allow_repetition=False, retry=retry, runtime_state=runtime,
             speaker=speaker_id, room=True, retry_allowed=not schema_retried,
             fidelity_contract=fidelity, request_text=last_content,
-            visible_history=(), provenance=provenance,
+            visible_history=[message.content for message in messages
+                             if message.speaker_character_id != speaker_id],
         )
         attempts = max(attempts, 1 + outcome.retry_count)
         set_safe_metadata(**outcome.safe_metadata("character_pair",
                                                    "Korean" if room_language == "ko" else "English"),
                           loop_guard_triggered=outcome.initial.semantic_loop_detected)
         set_safe_metadata(retry_count=attempts - 1, corrective_retry=attempts > 1)
-        set_safe_metadata(provider_call_count=attempts)
         response = outcome.text
 
         persisted_turn = Message(conversation_id=room_id, role=MessageRole.CHARACTER,
@@ -315,9 +307,7 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
                                  content=response)
         db.add(persisted_turn)
         db.flush()
-        advance_runtime(runtime, outcome.turn, response, speaker_id, persisted_turn.id,
-                        strict_room=True)
-        runtime.knowledge_provenance_summary = provenance.safe_counts()
+        advance_runtime(runtime, outcome.turn, response, speaker_id, persisted_turn.id)
         advanced = db.execute(update(Conversation).where(
             Conversation.id == room_id, Conversation.user_id == user_id,
             Conversation.generation_token == token, Conversation.turn_index == expected_turn_index,
@@ -333,7 +323,6 @@ def next_turn(db: Session, room_id: str, user_id: str, expected_turn_index: int)
         set_safe_metadata(**_usage_totals(db, room_id, token, attempts, user_id))
         return result
     except Exception as exc:
-        set_safe_metadata(provider_call_count=attempts)
         set_safe_metadata(provider_error_category=classify_llm_failure(exc).kind.value)
         _release_claim(db, room_id, user_id, token)
         if attempts:

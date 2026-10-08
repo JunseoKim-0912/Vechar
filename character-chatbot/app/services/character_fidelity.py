@@ -11,7 +11,6 @@ from collections.abc import Sequence
 
 from ..schemas import CharacterProfileData, WorldProfileData
 from .character_timeline import derive_chat_reference
-from .knowledge_provenance import KnowledgeProvenance
 
 FIDELITY_CONTRACT_VERSION = 1
 _ANCHOR_CHARS = 120
@@ -153,8 +152,6 @@ _FORMAL_PROOF = re.compile(r"\b(?:step\s*\d+|by definition|therefore|hence|"
                            r"let\s+[a-z]\s*\[\s*n\s*\]|q\.?e\.?d\.?)\b|"
                            r"(?:단계\s*\d+|정의에\s*따라|따라서)", re.I)
 _MATH_NOTATION = re.compile(r"(?:[a-z]\s*\[\s*n\s*\]|[∑Σ]|\*\s*[a-z]|=.{0,30}=)", re.I)
-_PROOF_REASONING = re.compile(r"\b(?:contradict(?:ion|s|ing)?|every term|each term|"
-                              r"impossible|vanish(?:es)?|so .{0,35}right.sided)\b", re.I)
 _UNCERTAINTY = re.compile(r"\b(?:i (?:do not|don't) know|unfamiliar|not sure|"
                           r"beyond my experience|what do you mean|you explained|from what you said)\b|"
                           r"(?:모르겠|낯설|무슨\s*뜻|설명해|말해준\s*바에)", re.I)
@@ -177,7 +174,6 @@ class FidelityAssessment:
     persona_drift_signal: bool = False
     temporal_scope_signal: bool = False
     hard_violation: bool = False
-    prior_self_expertise_blocked: bool = False
 
     @property
     def violation(self) -> bool:
@@ -187,25 +183,17 @@ class FidelityAssessment:
 
 def assess_fidelity(response: str, *, scope: KnowledgeScope, persona_preserved: bool,
                     assistant_mode: bool, contract: CharacterFidelityContract,
-                    request_text: str, visible_history: Sequence[str] = (),
-                    provenance: KnowledgeProvenance | None = None) -> FidelityAssessment:
+                    request_text: str, visible_history: Sequence[str] = ()) -> FidelityAssessment:
     """Flag high-confidence visible violations; model booleans cannot veto them."""
     # Only a taught definition of the *principal* subject grants contextual
     # reasoning, not the mere appearance of a technical word in a question.
-    # Legacy direct callers supply user-only visible_history. Production supplies
-    # role-derived provenance, so old assistant proofs and peer claims cannot
-    # silently become evidence of the character's specialist expertise.
-    user_explanations = (provenance.user_provided if provenance is not None
-                         else (*visible_history[-6:], request_text))
-    taught = any(_EXPLAINED_SIGNAL.search(item) for item in user_explanations)
+    taught = any(_EXPLAINED_SIGNAL.search(item) for item in (*visible_history[-6:], request_text))
     signal_question = bool(_SIGNAL_QUESTION.search(request_text))
     specialist_supported = bool(_SIGNAL_EXPERTISE.search(contract.evidence))
     teaching_role = bool(_TEACHING_EXPERTISE.search(f"{contract.identity} {contract.role or ''}"))
     unsupported_specialist = signal_question and not specialist_supported and not taught
-    plain_response = response.replace(r"\(", "").replace(r"\)", "")
-    markers = len(_FORMAL_PROOF.findall(plain_response))
-    formal_answer = bool((markers >= 2 or (markers >= 1 and _MATH_NOTATION.search(plain_response))
-                         or (_MATH_NOTATION.search(plain_response) and _PROOF_REASONING.search(plain_response)))
+    markers = len(_FORMAL_PROOF.findall(response))
+    formal_answer = bool((markers >= 2 or (markers >= 1 and _MATH_NOTATION.search(response)))
                          and len(response) >= 65 and not _UNCERTAINTY.search(response))
     hard_self_presentation = bool(_HARD_ASSISTANT.search(response))
     helper_pitch = bool(_HELPER_PITCH.search(response))
@@ -213,8 +201,6 @@ def assess_fidelity(response: str, *, scope: KnowledgeScope, persona_preserved: 
     drift = bool(helper_pitch and (_is_terse(style_anchors) or
                  (not persona_preserved and not _POLITE_STYLE.search(style_anchors))))
     knowledge_issue = bool(unsupported_specialist and formal_answer)
-    prior_self_blocked = bool(provenance and provenance.prior_self_outputs
-                              and signal_question and not specialist_supported and not taught)
     # Metadata can strengthen a supported observation, never declare itself true.
     assistant_leak = bool(hard_self_presentation or
                           (helper_pitch and (unsupported_specialist or
@@ -233,5 +219,4 @@ def assess_fidelity(response: str, *, scope: KnowledgeScope, persona_preserved: 
         persona_drift_signal=drift,
         temporal_scope_signal=temporal,
         hard_violation=bool(hard_self_presentation or (knowledge_issue and _MATH_NOTATION.search(response))),
-        prior_self_expertise_blocked=prior_self_blocked,
     )

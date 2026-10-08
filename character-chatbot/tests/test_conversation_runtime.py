@@ -182,14 +182,15 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertEqual(result.retry_count, 1)
 
     def test_retry_falls_back_if_it_introduces_new_safety_violation(self):
-        from app.services.response_quality import InvalidConversationTransitionError
-        with self.assertRaises(InvalidConversationTransitionError):
-            select_quality_response(
-                turn("You should call Grete."), same_speaker_recent=[], language="English",
-                allow_repetition=False, retry=lambda _: turn("Grete answered. づ", new_development="grete_answered"),
-                runtime_state=ConversationRuntimeState(resolved_threads=["should_gregor_call_grete"]),
-                speaker="doctor", room=True,
-            )
+        result = select_quality_response(
+            turn("You should call Grete."), same_speaker_recent=[], language="English",
+            allow_repetition=False, retry=lambda _: turn("Grete answered. づ", new_development="grete_answered"),
+            runtime_state=ConversationRuntimeState(resolved_threads=["should_gregor_call_grete"]),
+            speaker="doctor", room=True,
+        )
+        self.assertTrue(result.retry_fallback)
+        self.assertEqual(result.text, "You should call Grete.")
+        self.assertEqual(result.retry_count, 1)
 
 
 if __name__ == "__main__":

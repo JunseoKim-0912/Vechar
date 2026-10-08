@@ -23,7 +23,6 @@ from .chat_language import response_language
 from .conversation_loop_guard import is_obvious_loop
 from .response_quality import explicit_repetition_request, select_quality_response
 from .conversation_runtime import ConversationRuntimeState, advance_runtime, turn_output_instructions
-from .knowledge_provenance import KnowledgeProvenance
 from .character_fidelity import build_fidelity_contract
 
 CORRECTION_PREFIX = "/수정"
@@ -118,10 +117,6 @@ def send_message(
             user_id=user_id, character_id=character_id,
             conversation_id=conversation_id, current_message=user_message,
         )
-    provenance = KnowledgeProvenance.for_user_chat(
-        history, user_message, len(memory_result.candidates),
-    )
-    set_safe_metadata(**provenance.safe_counts())
 
     user_turn = Message(conversation_id=conversation_id, role=MessageRole.USER, content=user_message)
     db.add(user_turn)
@@ -137,8 +132,7 @@ def send_message(
             current_message=user_message, recent_messages=[(m.role, m.content) for m in history],
             fidelity_contract=fidelity,
         )
-        instructions += runtime.prompt_block(character_id, room=False)
-        instructions += provenance.prompt_block() + turn_output_instructions()
+        instructions += runtime.prompt_block(character_id) + turn_output_instructions()
     language = response_language(user_message, [(m.role, m.content) for m in history], locale)
     set_safe_metadata(conversation_type="user_character", response_language=language,
                       conversation_id=conversation_id)
@@ -200,19 +194,16 @@ def send_message(
         retry_allowed=not schema_retried,
         fidelity_contract=fidelity, request_text=user_message,
         visible_history=[m.content for m in history if m.role == MessageRole.USER],
-        provenance=provenance,
     )
     set_safe_metadata(**outcome.safe_metadata("user_character", language))
     set_safe_metadata(retry_count=max(int(schema_retried), outcome.retry_count),
-                      corrective_retry=bool(schema_retried or outcome.retry_count),
-                      provider_call_count=1 + max(int(schema_retried), outcome.retry_count))
+                      corrective_retry=bool(schema_retried or outcome.retry_count))
     reply_text = outcome.text
 
     assistant_turn = Message(conversation_id=conversation_id, role=MessageRole.CHARACTER, content=reply_text)
     db.add(assistant_turn)
     db.flush()
     advance_runtime(runtime, outcome.turn, reply_text, character_id, assistant_turn.id)
-    runtime.knowledge_provenance_summary = provenance.safe_counts()
     if conversation:
         conversation.runtime_state = runtime.to_storage()
     ingestion = memory_jobs.schedule_ingestion(
